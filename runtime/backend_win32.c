@@ -579,6 +579,12 @@ void video_poll(void){
   }
   /* Observe held test buttons even when the panel is closed. Opening with a held button must not act on it again. */
   int panel_input=settings_controller(devices,scripted,foreground);
+  { /* Orbitals gyro aiming: the pads' motion samples (orbitals_input.c), dropped like the buttons when unfocused or in the panel */
+    int want=orbitals_gyro_wanted(); win_gamepads_motion_enable(want);
+    for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+      PadMotion m[256]; int n= want? win_gamepads_motion(i,m,256) : 0;
+      orbitals_gyro_pad(i,devices[i].id,devices[i].vendor,devices[i].product,devices[i].sdl_buttons,devices[i].zl,m,n,devices[i].has_gyro==1,focused && !panel_input);
+    } }
   focused=focused && !panel_input;
   static u32 last_ids[WIN_GAMEPAD_SLOTS];
   for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
