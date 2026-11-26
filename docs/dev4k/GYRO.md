@@ -27,6 +27,9 @@ A `save/gyro_calibration.txt` written by the earlier build is not read or moved;
 until it is moved out.
 
 ## How it turns the camera
+**PC validation, 08:44:** the current gate is not accepted. It opens briefly during the title world's initialization, but closes
+in the actual co-op ship scene because each player's view target is a separate controlled actor, not `AController::Pawn`.
+The synthetic result at 18-20 seconds belongs to initialization, not gameplay. A game-specific ownership gate is under investigation.
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
@@ -38,8 +41,8 @@ until it is moved out.
   virtual at vtable+0x8d8, main+0x2c9d810, returns it != 0) is 0, the PlayerCameraManager (+0x368) is readable, its
   ViewTarget.Target (+0x340) is the pawn and its PendingViewTarget.Target (+0xc00) is empty or the pawn, and DeltaTime > 0. The
   pawn and view target are compared as pointers, never read; anything unreadable closes the gate. A closed gate still takes the
-  waiting turn and drops it, so nothing builds up in menus, cinematics or the title. Conservative: that gameplay has the view
-  target equal to the pawn is NOT OBSERVED yet; `gyro_log=1` prints every gate change with the raw pointers.
+  waiting turn and drops it. The assumption that gameplay has view target equal to pawn was disproved by the PC run above;
+  this condition needs replacement. `gyro_log=1` prints every gate change with the raw pointers.
 - Pause: the paused world tick (TickActor main+0x3208eb0, paused path +0x3209130) zeroes RotationInput and usually does not call
   PlayerTick, so UpdateRotation does not run at all (the earlier note "DeltaTime 0" was wrong). A turn nobody took for 100 ms is
   dropped when the next sample arrives, and a turn waiting when UpdateRotation comes back after more than 100 ms is dropped too, so
@@ -61,8 +64,8 @@ until it is moved out.
   fresh sessions, profile isolation, preserving another controller model, failed-write retention, saves still exportable with
   calibration stored, restore keeping it (also for a session started before the restore), a standalone install, an unexpected or
   dangling save link storing nothing, the host-clock to sensor-clock rollback, and the forward jump when polling takes over (the
-  earlier build calibrated 0.24 s after the events stopped). The earlier build fails five of them. Linux: 8/8 pass; Windows: run by
-  the PC gate.
+  earlier build calibrated 0.24 s after the events stopped). The earlier build fails five of them. Linux and Windows: 8/8 pass.
+  The gyro gate C harness also passes on Windows; its simulated camera does not establish the real game's camera relationship.
 - Gate tests (`python tests/test_gyro_gate.py`, C in `tests/test_gyro_gate.c`): the real `orbitals_gyro_pad` and hooked
   UpdateRotation on fake guest controllers with small engine stand-ins. Each closed case (title without a pawn, pending view target
   another actor, IgnoreLookInput, camera manager or controller field unreadable, tagged pawn pointer, pawn not acknowledged,
@@ -90,8 +93,7 @@ until it is moved out.
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
 
 ## Not verified
-- The gate in the real game: NOT OBSERVED. That it opens in gameplay (view target = pawn) and stays closed at the title, menus and
-  cinematics must be checked on the PC with `gyro_log=1` (`gyro gate:` lines) and the synthetic test in gameplay.
+- The current gate fails the real gameplay check, as recorded above. A synthetic PASS during initialization is not acceptance.
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
   if it is the other way.
 - Steam Input / DS5Bridge can take the pad's sensors before SDL; the log line `gyro: P1 ... has a gyro` confirms SDL sees them.

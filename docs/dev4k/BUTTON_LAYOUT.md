@@ -3,7 +3,10 @@
 Ini keys (Orbitals.ini, launcher Controls page): `button_layout=nintendo|xbox|playstation`, `button_accept_bottom=0|1`.
 Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming PC on 2026-11-26.
 
-## Icons (works)
+## Icons (not working in the current PC validation)
+The 08:30-08:44 PC runs with PlayStation selected still show Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
+The regenerated module exports the dynamic lookup and both generated caller chunks use `CALLDYN`, but the opt-in
+`SWR_ICON_TRACE=1` logs no calls to the wrapper. The installation log alone is not proof that a prompt reaches it.
 - The game ships every icon: `DA_PlatformInputIcons` maps each FKey to a texture per `EPlatformType`
   (Desktop 0, Playstation 1, Xbox 2, Switch 3). The Switch 2 build always draws the Switch entry (which reuses the Xbox
   letter textures, swapped to the Nintendo positions).
@@ -30,8 +33,8 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   "a key without a PlayStation icon keeps the platform 3 one".
 - Before (removed): a low-priority thread scanned all guest memory once a second for those 4-entry maps and rewrote their Switch
   texture. It cost 10.7% frames over 17.7 ms at 1800p co-op (see Performance below).
-- Buttons keep their places: accept stays on the right button (Circle / Xbox B) and the prompts show exactly that
-  ("○ Comenzar" on the title screen). Checked: title, main menu, lobby, prompts in co-op (screenshots in the night report).
+- With `button_accept_bottom=1`, the latest PC run accepts title/main/lobby with the bottom button and returns from the lobby
+  with the right button. The glyphs remain Nintendo. Both-player gameplay and Xbox validation are still pending.
 
 ## Accept on the bottom button (experimental, partial)
 - The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (`BP_Switch2InputPlatformData`
@@ -46,14 +49,12 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 - `button_accept_bottom=1`: the runtime points each redirect of `UEnhancedInputPlatformData` objects (vtable
   main+0x7fecb38, TMap at +0x28) at its own source context as they load (wrappers on the object's virtual functions, see below; the
   memory scan that also did it is removed) and the user
-  Game.ini gives the UI the PC contexts. Result: lobby and later screens accept with the bottom button and go back with the
-  right one, prompts matching. CommonUI's own buttons (title "Comenzar", main menu items, the lobby's "Comenzar") keep the
-  platform's accept key (right button): that comes from the platform's `bSwapForwardAndBackButtons`, not Enhanced Input.
-  So with this switch the first screens still need the right button: experimental, off by default.
+  Game.ini gives the UI the PC contexts. The EKeys initializer hook below also swaps CommonUI's accept/back keys.
+  The latest PC run confirms bottom acceptance on title, main menu and lobby, and right-button back from lobby.
+  Six redirects are rewritten before use. Glyphs and full gameplay coverage remain pending; the option is off by default.
 
 ## Next steps (not done)
-- CommonUI accept: find where the engine reads `bSwapForwardAndBackButtons` / `GetGamepadAcceptKey` in the binary and patch
-  the value at start (a data patch like the redirect one), then `button_accept_bottom` can become the PlayStation default.
+- Find the prompt path actually used on the PC, then validate both players and layouts and measure the broad wrappers' cost.
 
 ## Review notes (Codex, 2026-11-26)
 - (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
@@ -63,7 +64,7 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   class checked), counters, free list and hash untouched. The narrow fix is the C++ consumer of the redirects (Enhanced Input's
   rebuild) through `DYNAMIC_CALLS`; it is not found yet (the native `GetContextRedirect` 0x37fc7a0 is only reached from its exec).
 
-## Platform accept / back keys (built 2026-11-26, offline reading of `main.bin`; not yet run on the PC)
+## Platform accept / back keys (built and booted on the PC)
 - `EKeys::Virtual_Accept` main+0x94ed438 and `Virtual_Back` main+0x94ed450 are 0x18-byte `FKey` copies (FName, KeyDetails pointer,
   reference controller) of `Gamepad_FaceButton_Right` main+0x94ec040 and `Gamepad_FaceButton_Bottom` main+0x94ec028, made at the end
   of the `EKeys` static initializer main+0x50dc00 (0x51188c-0x5118e0, returns 0x5119a4; its only reference is the init array entry
