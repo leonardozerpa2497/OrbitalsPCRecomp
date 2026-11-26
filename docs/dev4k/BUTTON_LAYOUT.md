@@ -15,6 +15,10 @@ The corresponding `-coop`, `-paused`, `-back-result` and `-resumed` screenshots 
 It is not Settings evidence. The later manually inspected `xbox-settings-verified_s.png` shows A Select/B Back in Settings;
 P1's bottom button entered it and right button returned to the main menu. P2's right button did not navigate this front-end screen
 before joining co-op; P2's in-game pause/back/resume flow did work. Do not count the front-end P2 attempt as a pass.
+Run `xbox-player2-settings` subsequently verifies P2's own in-game Settings flow: Plus opens pause, D-pad down selects
+Settings, bottom A enters, and right B returns to pause. Inspected `-settings-selected`, `-settings-native`, `-settings`
+and `-pause-after-settings` screenshots show A Select/B Back. P1 closes the additional native PC panel before the P2
+game-Back check; that separate panel action is not counted as P2 evidence.
 The eight-run Nintendo/PlayStation comparison and installed
 Windows launcher evidence are recorded in [LAYOUT_BENCH.md](LAYOUT_BENCH.md); no consistent FPS regression was measured.
 
@@ -96,7 +100,7 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   The runtime option is off by default. The installed launcher ties bottom acceptance to Xbox/PlayStation.
 
 ## Next steps (not done)
-- Check player two's Settings flow from its own in-game pause menu; the pre-join front-end ignores its navigation.
+- Player two's in-game Settings flow is verified above; the pre-join front-end ignores its navigation.
   The module has been regenerated, the action-prompt trace and real replacement glyphs observed.
   Validate on-foot jump and remaining gameplay interactions without advancing the fixed benchmark save.
 
