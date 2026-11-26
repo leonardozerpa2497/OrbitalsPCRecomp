@@ -238,8 +238,9 @@ static void acc_lock(int s){ while(__atomic_exchange_n(&Acc[s].lock,1,__ATOMIC_A
 static void acc_unlock(int s){ __atomic_store_n(&Acc[s].lock,0,__ATOMIC_RELEASE); }
 static void acc_clear(int s){ acc_lock(s); Acc[s].yaw=Acc[s].pitch=0; acc_unlock(s); }
 
-/* stored calibration: lines "vid:pid bx by bz" (rad/s) in gyro_calibration.txt beside the exe */
-static void calib_path(char* p, size_t n){ snprintf(p,n,"%sgyro_calibration.txt",g_exedir); }
+/* The launcher creates a new executable directory each run, but data/save is a junction to the profile's persistent saves.
+   Keep calibration there so a fresh session sees it, and different launcher profiles stay isolated. */
+static void calib_path(char* p, size_t n){ snprintf(p,n,"%ssave/gyro_calibration.txt",g_datadir); }
 static int calib_load(GyroPad* g){
   char p[1200]; calib_path(p,sizeof p); FILE* f=fopen(p,"rb"); if(!f) return 0;
   char line[256]; int found=0;
@@ -249,12 +250,19 @@ static int calib_load(GyroPad* g){
   }
   fclose(f); return found;
 }
-static void calib_store(const GyroPad* g){
+static int calib_store(const GyroPad* g){
   char p[1200], tmp[1300]; calib_path(p,sizeof p); snprintf(tmp,sizeof tmp,"%s.tmp",p);
-  FILE* in=fopen(p,"rb"); FILE* out=fopen(tmp,"wb"); if(!out){ if(in) fclose(in); return; }
+  char dir[1200]; snprintf(dir,sizeof dir,"%ssave",g_datadir); plat_mkdir(dir);
+  FILE* in=fopen(p,"rb"); FILE* out=fopen(tmp,"wb"); if(!out){ if(in) fclose(in); return 0; }
   if(in){ char line[256]; while(fgets(line,sizeof line,in)){ unsigned vid,pid; if(sscanf(line,"%x:%x",&vid,&pid)==2 && vid==g->vendor && pid==g->product) continue; fputs(line,out); } fclose(in); }
   fprintf(out,"%04x:%04x %.6f %.6f %.6f\n",g->vendor,g->product,g->bias[0],g->bias[1],g->bias[2]);
-  fclose(out); remove(p); rename(tmp,p);
+  int failed=ferror(out); if(fclose(out)) failed=1;
+  if(failed) return 0;
+#ifdef _WIN32
+  return MoveFileExA(tmp,p,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+#else
+  return rename(tmp,p)==0;
+#endif
 }
 
 static void still_reset(GyroPad* g, u64 t, const float* raw){
@@ -265,6 +273,9 @@ static void still_reset(GyroPad* g, u64 t, const float* raw){
    well under that, so a slow steady turn is not taken for one). The automatic one never moves a stored calibration by more than
    0.015 rad/s. Manual (gyro_calibrate=1, or the gyro button held): a 2 s / 3 s window that starts once asked */
 static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_hold){
+  /* Polling uses the host clock; the first SDL sensor event can switch to the device's smaller timestamp.
+     Start a fresh still window instead of waiting for that clock to catch up with the host's uptime. */
+  if(t<g->still_t0){ still_reset(g,t,raw); return; }
   int moving=0;
   for(int k=0;k<3;k++){
     if(fabsf(raw[k])>0.04f) moving=1;
@@ -282,9 +293,14 @@ static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_
     for(int k=0;k<3;k++) if(fabsf(mean[k]-g->bias[k])>0.015f){ still_reset(g,t,raw); return; }
   memcpy(g->bias,mean,sizeof mean);
   if(G.calibrate || manual_hold){
-    g->calibrated=2; calib_store(g);
-    LOG("gyro: P%d calibrated and stored for %04x:%04x: %.4f %.4f %.4f rad/s (%d samples)\n",s+1,g->vendor,g->product,g->bias[0],g->bias[1],g->bias[2],g->still_n);
-    if(G.calibrate){ G.calibrate=0; ini_set("gyro_calibrate","0"); }
+    if(calib_store(g)){
+      g->calibrated=2;
+      LOG("gyro: P%d calibrated and stored for %04x:%04x: %.4f %.4f %.4f rad/s (%d samples)\n",s+1,g->vendor,g->product,g->bias[0],g->bias[1],g->bias[2],g->still_n);
+      if(G.calibrate){ G.calibrate=0; ini_set("gyro_calibrate","0"); }
+    } else {
+      g->calibrated=1;
+      WARN("gyro: P%d calibration active for this session, but could not store it in the profile\n",s+1);
+    }
   } else {
     if(!g->calibrated) LOG("gyro: P%d auto calibration %.4f %.4f %.4f rad/s\n",s+1,g->bias[0],g->bias[1],g->bias[2]);
     if(!g->calibrated) g->calibrated=1;
