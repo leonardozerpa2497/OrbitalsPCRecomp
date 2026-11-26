@@ -81,23 +81,6 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   return with the right button, and use the selected layout's glyphs. Xbox player two's pause/resume flow also passes.
   On-foot jump and every gameplay interaction have not been exercised.
 
-## Controller drawings (built and unit-tested; not yet observed on the PC)
-- The PS screenshot `gameplay-local-menu_s.png` showed Cross/Circle prompts but two Nintendo Pro drawings. Those drawings come from an
-  image widget, not from `DA_PlatformInputIcons`: main+0x40e13e0 `(widget, EGamepadType)` takes the texture from the widget's own
-  `TMap<EGamepadType, UTexture2D*>` at widget+0x190 (lookup main+0x40e1700; 0x18-byte elements, the same layout as the per-key platform
-  maps), else a fallback rule at +0x1e0 (sibling type: DualShock <-> DualSense, JoyCons <-> Pro). `EGamepadType` (enum name table
-  main+0x86eada0): XboxSeries 0, SonyDualShock 1, SonyDualSense 2, NintendoJoyCons 3, NintendoPro 4, None 5. Callers: a direct `bl`
-  from its Blueprint exec (0x40b1500) and the widget refresh (0x40e1188, type = subsystem byte +0x30 via 0x2082d40), plus a delegate
-  bound to its address (adr at 0x40e1168).
-- `pad_image` (runtime/orbitals_buttons.h, installed by `pad_image_install`, fail-closed word checks): a Nintendo request (3 / 4)
-  becomes Xbox 0, or PlayStation DualSense 2 (else DualShock 1), only when the widget's map, read with the same bounded checks before
-  the call, has a non-NULL texture for it. Otherwise the original type is passed. Only x1 changes; nothing is read after the call.
-  Types other than 3 / 4 (None included) pass through, so a hidden widget is not made visible.
-- **Generate the code module again**: `DYNAMIC_CALLS` lists main+0x40e13e0. An older module logs "controller image: not applied
-  (... generate it again ...)". Unknown until the PC run: whether the shipped widget maps contain Xbox / PlayStation art and which type
-  the lobby asks for. `SWR_ICON_TRACE=1` logs the first 16 calls (type old -> new, reason kept); "keeps the Nintendo drawing (no image
-  for the layout)" means the art is not in the widget.
-
 ## Accept on the bottom button (live menus verified; gameplay coverage partial)
 - The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (`BP_Switch2InputPlatformData`
   MappingContextRedirects: IMC_UI_Default, IMC_UI_CRU, IMC_Default, IMC_Cutscene, IMC_SpiritJug, IMC_SettlementGames ->

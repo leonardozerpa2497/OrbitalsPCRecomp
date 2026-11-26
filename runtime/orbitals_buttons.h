@@ -146,41 +146,6 @@ static void icon_prompt(CPU* c, u64 entry){
     LOG("Orbitals: button icons: a prompt keeps its Switch icon (%s)\n",why);
 }
 
-/* The controller drawing (the lobby's two gamepads), main+0x40e13e0 (image widget, EGamepadType) -> void: it takes the texture for that
-   gamepad type from the widget's own TMap<EGamepadType, UTexture2D*> at widget+0x190 (main+0x40e1700: data +0x190, count +0x198,
-   free count +0x1c4, hash inline +0x1c8 / heap +0x1d0, hash size +0x1d8; 0x18-byte elements {type byte, texture +8, hash next +0x10},
-   the same layout icon_plat_find reads at el+0x18, so el = widget+0x178), else its default type (+0x1e0), and sets the brush.
-   EGamepadType (main.bin enum table main+0x86eada0): XboxSeries 0, SonyDualShock 1, SonyDualSense 2, NintendoJoyCons 3, NintendoPro 4.
-   A Nintendo request (3 / 4) asks the layout's type instead (Xbox 0; PlayStation DualSense 2, else DualShock 1) only when the widget's
-   map, checked before the call while the caller holds the widget, has a non-NULL texture for it; any miss or malformed map keeps the
-   original type. Only x1 changes; nothing is read or written after the call. */
-static GuestFn pad_image_orig;
-static u8 pad_image_type(u64 widget, u8 type, const char** why){
-  *why=NULL;
-  if(type!=3 && type!=4) return type;
-  if(!widget || (widget&7) || !guest_span_readable(widget+0x178,0x68,8)){ *why="widget not readable"; return type; }
-  u8 want[2]; int n=0;
-  if(g_icon_want==2) want[n++]=0; else { want[n++]=2; want[n++]=1; }
-  for(int k=0;k<n;k++){
-    u64 tex=0; int f=icon_plat_find(widget+0x178,want[k],&tex);
-    if(f<0){ *why="image map"; return type; }
-    if(f && tex) return want[k];
-  }
-  *why="no image for the layout";
-  return type;
-}
-static void pad_image(CPU* c, u64 entry){
-  u8 type=(u8)c->x[1]; const char* why;
-  u8 t=pad_image_type(c->x[0],type,&why);
-  static unsigned traced; static int said;
-  if(icon_trace() && __atomic_fetch_add(&traced,1,__ATOMIC_RELAXED)<16)
-    LOG("Orbitals: controller image reached: caller main+%llx, widget %llx, type %u -> %u%s%s\n",(unsigned long long)(c->x[30]-g_icon_base),
-        (unsigned long long)c->x[0],type,t,why?", kept: ":"",why?why:"");
-  if(why && !__atomic_exchange_n(&said,1,__ATOMIC_RELAXED)) LOG("Orbitals: controller image: keeps the Nintendo drawing (%s)\n",why);
-  if(t!=type) c->x[1]=(c->x[1]&~0xffull)|t;
-  pad_image_orig(c,entry);
-}
-
 /* UEnhancedInputPlatformData::MappingContextRedirects, a TMap at obj+0x28: TSparseArray data +0x28, count +0x30, capacity +0x34,
    allocation flags TBitArray (4 inline words +0x38, heap pointer +0x48, bit count +0x50, bit capacity +0x54), first free +0x58, free
    count +0x5c. The bit array uses the heap pointer whenever it is set (its capacity outgrew the inline words), whatever the bit count. */

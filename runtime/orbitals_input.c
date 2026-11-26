@@ -127,29 +127,6 @@ static void icon_prompt_install(const SwrModInfo* mod){
   icon_prompt_orig=*e; *e=icon_prompt;
   LOG("Orbitals: button prompts: %s icons (action prompt main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_PROMPT);
 }
-/* The controller drawing (pad_image, orbitals_buttons.h): main+0x40e13e0, reached by a direct bl from its Blueprint exec
-   (main+0x40b1500) and the widget's refresh (main+0x40e1188, with the subsystem's gamepad type main+0x2082d40), and through a delegate
-   (adr at main+0x40e1168). Checked: its entry, the lookup call, the lookup's map fields and stride, and the callers' words. */
-enum { PAD_IMAGE=0x40e13e0 };
-static void pad_image_install(const SwrModInfo* mod){
-  static const struct { u32 off, w; } sig[]={
-    {0x40e13e0,0xd503237f}, {0x40e13e4,0xd10183ff}, {0x40e1400,0x940000c0},  /* pacibsp; sub sp, sp, #0x60; bl 0x40e1700 */
-    {0x40e1700,0xd503237f}, {0x40e1708,0xb9419808}, {0x40e170c,0xb941c409},  /* lookup: count +0x198, free count +0x1c4 */
-    {0x40e1720,0xb941d808}, {0x40e1724,0xf940e80a}, {0x40e1728,0x91072009},  /* hash size +0x1d8, heap +0x1d0, inline +0x1c8 */
-    {0x40e174c,0xf940c808}, {0x40e1750,0x52800309}, {0x40e1764,0x3940014b},  /* data +0x190; stride 0x18; type byte */
-    {0x40e1770,0xb940114a}, {0x40e1788,0xf9400553},                          /* hash next +0x10; texture +8 */
-    {0x40b1500,0x9400bfb8}, {0x40e1188,0x94000096}, {0x40e1168,0x100013c2} };
-  for(unsigned i=0;i<sizeof sig/sizeof sig[0];i++){
-    u64 a=mod->base+sig[i].off;
-    if(a<g_code_lo || a>=g_code_hi || gr32(a)!=sig[i].w){ LOG("Orbitals: controller image: not applied (image widget not found, %x)\n",sig[i].off); return; }
-  }
-  u64 pc=mod->base+PAD_IMAGE;
-  GuestFn* e=&g_disp[(pc-g_code_lo)/4];
-  if(!*e){ LOG("Orbitals: controller image: not applied (no entry)\n"); return; }
-  if(!code_dynamic_call(pc)){ LOG("Orbitals: controller image: not applied (the game code calls it directly: generate it again with this SwitchRecomp)\n"); return; }
-  pad_image_orig=*e; *e=pad_image;
-  LOG("Orbitals: controller image: %s drawing when the widget has one (main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",PAD_IMAGE);
-}
 /* The platform's accept / back keys. Unreal builds EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey() and Virtual_Back =
    GetGamepadBackKey() as copies of two face button FKeys at the end of the EKeys static initializer (main+0x50dc00, called once from
    the init array): on Switch accept = FaceButton_Right, back = FaceButton_Bottom (main+0x51188c-0x5118e0). Every runtime reader goes
@@ -192,7 +169,6 @@ static void ei_install(const SwrModInfo* mod){
   g_icon_want= g_layout==1? 2 : 1; g_icon_base=mod->base;
   icon_install(mod);
   icon_prompt_install(mod);
-  pad_image_install(mod);
   if(!g_accept_bottom) return;
   ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;

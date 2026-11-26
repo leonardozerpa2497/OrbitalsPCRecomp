@@ -18,9 +18,8 @@ UNCOND = ('b', 'br', 'ret', 'brk')
 # go through the dispatch table (CALLDYN) instead of a direct C call, and the module lists them in swr_dynamic_calls so the
 # runtime can tell. Module build id (first 16 bytes, hex) -> offsets in that module.
 DYNAMIC_CALLS = {
-    # Orbitals main (runtime/orbitals_buttons.h): the action prompt (icon_prompt), the button icon lookup (icon_lookup) and the
-    # controller drawing (pad_image)
-    '0f8ef52cf4eee37628f366a539d5d6ad': (0x40c5020, 0x40c5ce0, 0x40e13e0),
+    # Orbitals main (runtime/orbitals_buttons.h): the action prompt (icon_prompt) and the button icon lookup (icon_lookup)
+    '0f8ef52cf4eee37628f366a539d5d6ad': (0x40c5020, 0x40c5ce0),
 }
 
 
