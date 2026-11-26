@@ -43,29 +43,31 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   later Add on the same map could misbehave (the game is not seen adding to it after load); the virtual-function wrappers add a
   check to every call of those shared UObject functions.
 
-## WIP: where the accept key lives (offline binary reading, 2026-11-26, not built or run)
-Read from `main.bin` (module offsets, same build as `orbitals_build`); nothing below is patched yet.
-- `EKeys` static `FKey`s are 0x18 bytes (FName +0, KeyDetails object +8, reference controller +0x10), built by the
-  `EKeys` static initializer (runs from 0x50f4xx, returns at 0x5119a4): `Gamepad_FaceButton_Bottom` = main+0x94ec028
-  (0x50f560), `Gamepad_FaceButton_Right` = main+0x94ec040 (0x50f58c). x19 / x20 keep those two addresses until the end.
-- At the end of that initializer (0x51188c-0x5118e0) two more `FKey`s are copied with a reference added:
-  main+0x94ed438 <- `[x20]` (FaceButton_Right) and main+0x94ed450 <- `[x19]` (FaceButton_Bottom). The binary has no
-  "Virtual_Accept" string in any encoding, which fits Unreal's `EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey()` /
-  `Virtual_Back = GetGamepadBackKey()`: on Switch accept = right, back = bottom (DataDrivenPlatformInfo
-  `[InputInfo Switch2] bSwapForwardAndBackButtons=true` is a build-time key; its name is not in the binary).
-- Readers (adrp/add/ldr xrefs): main+0x94ed438 (Virtual_Accept) is compared with a key event's FName (event +0x28) at
-  0x388b07c / 0x388b0d0, 0x388bca0 and 0x40c60bc (not yet identified: likely CommonUI analog cursor / action router or a
-  button's key handler). main+0x94ed450 (Virtual_Back) has NO runtime reader, only its init and its atexit destructor
-  (0x50d8d8). So Slate / CommonUI "back" does not go through Virtual_Back, and "accept" is not only these 4 compares:
-  the main accept / back decision (FNavigationConfig or the Switch platform's own) must test the physical keys directly.
-- Other runtime readers of FaceButton_Right: 0x42bdc24 / 0x42bdd24 (key -> analog state table, not the decision).
-  FaceButton_Bottom: 0x2cf7e44 (builds a key copy). The static-init sites 0x51c4bc/0x51c5ac (EKeys::Initialize AddKey) and
-  0x52a378/0x52a3cc/0x52a8a0/0x52a8f4/0x52ad70/0x52adc4 (per-platform key display names) are not the decision either.
-- Not a fix: `UOrbGameSettingGamepad` `bInvertFaceBottomFaceRight` (menu "Invert Face Bottom / Face Right") is the game's own
-  remap and would move jump too (not checked in code).
-- Continue: (1) identify the functions at 0x388b0xx, 0x388bcxx, 0x40c60xx (callers, vtables, nearby strings); (2) find the
-  Slate navigation decision: xrefs of EKeys::SpaceBar (main+0x94eb458: readers 0x51346c, 0x2cf8074, 0x4210e60) — the
-  function that also compares FaceButton_Right/Bottom or Virtual_Accept is FNavigationConfig::GetNavigationActionFromKey or
-  its Switch override; (3) a candidate fix is to swap the two 0x18-byte FKeys at main+0x94ed438 / +0x94ed450 right after the
-  EKeys initializer returns (refcount neutral), plus whatever the decision in (2) needs; the existing g_accept_bottom
-  redirect emptying stays until that is measured. Tools: a numpy adrp/add/ldr xref scanner (scratch, not in git).
+## Platform accept / back keys (built 2026-11-26, offline reading of `main.bin`; not yet run on the PC)
+- `EKeys::Virtual_Accept` main+0x94ed438 and `Virtual_Back` main+0x94ed450 are 0x18-byte `FKey` copies (FName, KeyDetails pointer,
+  reference controller) of `Gamepad_FaceButton_Right` main+0x94ec040 and `Gamepad_FaceButton_Bottom` main+0x94ec028, made at the end
+  of the `EKeys` static initializer main+0x50dc00 (0x51188c-0x5118e0, returns 0x5119a4; its only reference is the init array entry
+  at main+0x7ee3150). The binary has no "Virtual_Accept" name: on Switch accept = right is decided at compile time.
+- Readers: directly (adrp/add) 0x388b07c / 0x388b0d0 (`FCommonAnalogCursor::HandleKeyDownEvent`: IsRelevantInput vtable +0x78,
+  ActionRouter at +0x70 ProcessInput vtable +0x2e8, then `FAnalogCursor::HandleKeyDownEvent` 0x6df4f0), 0x388bca0 (key up),
+  0x40c60bc; and through the GOT (main+0x8fa4680 = &Virtual_Accept, main+0x8fa4688 = &Virtual_Back), which the earlier adrp-only
+  scan missed: 0x6e8bec / 0x6e8c2c (`FNavigationConfig` constructor: KeyActionRules Enter / Virtual_Accept -> Accept, Escape /
+  Virtual_Back -> Back), 0x6de4d0 / 0x6df5a4 (`FAnalogCursor` click), 0x388ac2c (CommonUI, accept), 0x38befd8 (CommonUI, back).
+- `button_accept_bottom=1` (with xbox / playstation) now wraps that initializer: after it returns it swaps the two globals (each
+  reference controller stays referenced once, so counts and the exit destructors are unchanged), on the main thread before Slate,
+  CommonUI or any other reader exists. Fail closed: the entry and the two copy sequences are checked by instruction word, the GOT must
+  point at the two globals, Virtual_Accept must equal FaceButton_Right and Virtual_Back FaceButton_Bottom byte for byte; any miss logs
+  "accept on the bottom button: not applied (...)" and writes nothing.
+- Not touched: Enhanced Input mappings (jump stays on the bottom button), and the game's own `bInvertFaceBottomFaceRight`
+  (settings object +0xe1, setter 0x4602420 remaps every FaceButton_Bottom / Right binding, jump included).
+- Enhanced Input redirects: no longer emptied. Each live redirect element's target is set to its source (one aligned 8-byte store per
+  element, both must be objects of the same class); count, free list and hash are unchanged.
+
+## Performance: the icon scan (parent's measurement, 2026-11-26)
+- With `button_layout=playstation` the once-a-second whole-memory scan under the memory lock gives repeatable frame spikes at 1800p
+  (34-36 fps, p95 ~64 ms, p99 ~160 ms) against Nintendo 47 fps / p95 26 ms. It must not stay the final design.
+- Scanner-free route (not done): the icons are native: `UMoreporkInputIconDataAsset`, `UMoreporkInputIcon`,
+  `UMoreporkInputIconRichTextDecorator`, `UMoreporkInputIconCombo` (names in the reflection data). Find the native lookup that does
+  `TMap<EPlatformType, UTexture2D*>::Find(Switch=3)` (start from the UFunction / property tables of those classes, e.g. the
+  `InputIconData` property at main+0x86df628) and hook it to look up 1 (PlayStation) or 2 (Xbox); fall back to 3 when that entry is
+  empty. `GetPlatformIcons` / `SetPlatformIcons` (exec 0x449db80 / 0x449e150, field +0xd8) is only a bool user setting, not the type.

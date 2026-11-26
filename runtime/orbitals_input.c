@@ -17,8 +17,9 @@ void ini_set(const char* k, const char* v);   /* main.c: stores a setting and re
      to Switch versions (BP_Switch2InputPlatformData, MappingContextRedirects) and its UI lists those Switch versions
      (MoreporkDeveloperSettings PlatformMappingContexts). The redirect data does not come from the config at run time (a user Input.ini,
      the Generated platform layer and a replaced Switch2Input.ini inside the pak were all ignored), so the runtime empties the redirect
-     maps in memory as they load and gives the UI the PC contexts (user Game.ini): the lobby, the pause menu and the game then accept on
-     the bottom button. CommonUI's own buttons (title screen, main menu, "Comenzar") keep the platform's accept key, the right button.
+     maps' targets in memory as they load (each redirect points a context to itself) and gives the UI the PC contexts (user Game.ini):
+     the lobby, the pause menu and the game then accept on the bottom button. CommonUI's own buttons (title screen, main menu,
+     "Comenzar") and Slate navigation use the platform's accept / back keys: those two EKeys globals are swapped at start (ekeys_init).
    nintendo (default) changes nothing. */
 static int g_layout;   /* 0 nintendo, 1 xbox, 2 playstation */
 static int g_accept_bottom;   /* button_accept_bottom=1: Enhanced Input's Switch redirects taken out (experimental) */
@@ -58,9 +59,9 @@ const char* orbitals_layout_overlay(void){
 /* The Switch 2 mapping context redirects are not read from the config at run time (neither the user layer nor a replaced
    Switch2Input.ini changes them: measured 2026-11-26), so they are taken out of the loaded data instead. UEnhancedInputPlatformData
    (0x78 bytes, vtable main+0x7fecb38, built by main+0x16847a0) keeps MappingContextRedirects as a TMap at +0x28: TSparseArray data
-   pointer +0x28, count +0x30, capacity +0x34, allocation bits +0x38 (bit count +0x50), first free +0x58, free count +0x5c. A thread
-   looks for such objects in the game's memory a few times after start and empties their maps (count, bits and free list say "no
-   elements"; the memory stays allocated): Enhanced Input then keeps the PC version's contexts at its next rebuild. The game's own
+   pointer +0x28, count +0x30, capacity +0x34, allocation bits +0x38 (inline, pointer +0x48 past 128, bit count +0x50), first free +0x58,
+   free count +0x5c. Each redirect's target is set to its source (IMC_UI_Default -> IMC_UI_Default): no element is added or removed, so
+   the map's structure stays valid for its readers, and Enhanced Input keeps the PC version's contexts at its next rebuild. The game's own
    UI list (MoreporkDeveloperSettings PlatformMappingContexts, user Game.ini) is set to the same PC contexts so the prompts match. */
 enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
@@ -78,11 +79,23 @@ static int host_committed(const void* p, size_t n){ (void)p; (void)n; return 1; 
 #endif
 static int ei_clear(u64 obj){
   if((obj&7) || !mem_span_ok_locked(obj,0x78,PERM_RW)) return 0;
+  u64 data=gr64(obj+0x28);
   u32 num=gr32(obj+0x30), max=gr32(obj+0x34), bits=gr32(obj+0x50), nfree=gr32(obj+0x5c);
-  if(!num || num>256 || max<num || bits<num || bits>max+64 || nfree>num) return 0;
-  gw32(obj+0x50,0); gw32(obj+0x58,0xffffffffu); gw32(obj+0x5c,0); __atomic_store_n((u32*)GP(obj+0x30),0,__ATOMIC_RELEASE);
-  LOG("Orbitals: button layout: %u Switch mapping context redirects taken out of the platform data at %llx\n",num-nfree,(unsigned long long)obj);
-  return 1; }
+  if(!num || num>256 || max<num || bits<num || bits>max+64 || nfree>num || (data&7)) return 0;
+  u64 words= bits>128? gr64(obj+0x48) : obj+0x38;   /* TBitArray, 4 inline words */
+  if(!data || !words || !mem_span_ok_locked(data,24ull*bits,PERM_RW) || !mem_span_ok_locked(words,(bits+31)/32*4ull,PERM_R)) return 0;
+  /* every live element {key, value, hash next, hash index}: value := key, so each redirect points a context to itself. One aligned
+     8-byte store per element (a reader sees the old or the new context, both live objects); count, free list and hash stay as they are */
+  int changed=0;
+  for(u32 i=0;i<bits;i++){
+    if(!(gr32(words+4*(i/32))>>(i%32)&1)) continue;
+    u64 e=data+24ull*i, k=gr64(e), v=gr64(e+8);
+    if(!k || !v || k==v) continue;
+    if((k&7) || (v&7) || !mem_span_ok_locked(k,8,PERM_R) || !mem_span_ok_locked(v,8,PERM_R) || gr64(k)!=gr64(v)) return changed;   /* two mapping contexts or nothing */
+    __atomic_store_n((u64*)GP(e+8),k,__ATOMIC_RELEASE); changed++;
+  }
+  if(changed) LOG("Orbitals: button layout: %d Switch mapping context redirects of the platform data at %llx now keep the PC contexts\n",changed,(unsigned long long)obj);
+  return changed>0; }
 /* Button icons: DA_PlatformInputIcons maps each FKey to a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2,
    Switch 3), and the Switch 2 game always asks for the Switch entry. Each of those maps is 4 set elements of 24 bytes (key byte,
    texture pointer at +8, hash next id at +16, hash index at +20) holding the keys 0..3 and four textures of one class: the Switch
@@ -158,8 +171,46 @@ static void ei_virtual(CPU* c, u64 entry){
   orig(c,entry);
   if(obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable && gr32(obj+0x30)) mem_with_range(obj,0x78,ei_clear_cb,NULL);
 }
+/* The platform's accept / back keys. Unreal builds EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey() and Virtual_Back =
+   GetGamepadBackKey() as copies of two face button FKeys at the end of the EKeys static initializer (main+0x50dc00, called once from
+   the init array): on Switch accept = FaceButton_Right, back = FaceButton_Bottom (main+0x51188c-0x5118e0). Every runtime reader goes
+   through those two globals (directly or by the GOT at main+0x8fa4680 / 0x8fa4688): FNavigationConfig's KeyActionRules (built later,
+   when Slate starts), FAnalogCursor / FCommonAnalogCursor's click, CommonUI's action router accept / back. Enhanced Input mappings and
+   the game's own bInvertFaceBottomFaceRight name the physical keys and are not touched, so jump stays on the bottom button.
+   button_accept_bottom swaps the two 0x18-byte FKeys (FName, KeyDetails pointer, reference controller) right after the initializer
+   returns, on the game's main thread before any other code reads them: each controller stays referenced once, by the other global,
+   so the reference counts and the exit-time destructors are unchanged. Every check below must hold or nothing is written. */
+enum { EKEYS_INIT=0x50dc00, EKEY_BOTTOM=0x94ec028, EKEY_RIGHT=0x94ec040, EKEY_ACCEPT=0x94ed438, EKEY_BACK=0x94ed450,
+       GOT_ACCEPT=0x8fa4680, GOT_BACK=0x8fa4688 };
+static GuestFn ekeys_init_orig; static u64 g_main_base;
+static void ekeys_init(CPU* c, u64 entry){
+  ekeys_init_orig(c,entry);
+  u64 b=g_main_base, acc=b+EKEY_ACCEPT, back=b+EKEY_BACK, bot=b+EKEY_BOTTOM, right=b+EKEY_RIGHT;
+  const char* why=NULL;
+  if(!guest_span_readable(acc,0x30,8) || !guest_span_readable(bot,0x30,8) || !guest_span_readable(b+GOT_ACCEPT,16,8)) why="keys not readable";
+  else if(gr64(b+GOT_ACCEPT)!=acc || gr64(b+GOT_BACK)!=back) why="GOT entries differ";
+  else if(memcmp(GP(acc),GP(right),0x18) || memcmp(GP(back),GP(bot),0x18)) why="accept is not the right button";
+  else if(!gr64(acc) || gr64(acc)==gr64(back)) why="key names";
+  if(why){ LOG("Orbitals: accept on the bottom button: not applied (%s)\n",why); return; }
+  u8 t[0x18]; memcpy(t,GP(acc),0x18); memcpy(GP(acc),GP(back),0x18); memcpy(GP(back),t,0x18);
+  LOG("Orbitals: accept on the bottom button: platform accept key = bottom face button, back = right face button\n");
+}
+static void ekeys_install(const SwrModInfo* mod){
+  u64 pc=mod->base+EKEYS_INIT;
+  /* pacibsp at the entry; the two copies: ldp x8, x10, [x20]; adrp x9; add x9, x9, #0x438 / ldp x8, x10, [x19]; adrp x9; add x9, x9, #0x450 */
+  static const struct { u32 off, w; } sig[]={ {0x50dc00,0xd503237f}, {0x51188c,0xa9402a88}, {0x511894,0x9110e129},
+                                               {0x5118bc,0xa9402a68}, {0x5118c4,0x91114129} };
+  for(unsigned i=0;i<sizeof sig/sizeof sig[0];i++){
+    u64 a=mod->base+sig[i].off;
+    if(a<g_code_lo || a>=g_code_hi || gr32(a)!=sig[i].w){ LOG("Orbitals: accept on the bottom button: EKeys initializer not found (%x)\n",sig[i].off); return; }
+  }
+  GuestFn* e=&g_disp[(pc-g_code_lo)/4];
+  if(!*e){ LOG("Orbitals: accept on the bottom button: EKeys initializer has no entry\n"); return; }
+  g_main_base=mod->base; ekeys_init_orig=*e; *e=ekeys_init;
+}
 static void ei_install(const SwrModInfo* mod){
   if(!g_layout) return;
+  if(g_accept_bottom) ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;
   for(int i=0;g_accept_bottom && i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
     u64 slot=g_ei_vtable+8ull*i; if(!guest_span_readable(slot,8,8)) break;
