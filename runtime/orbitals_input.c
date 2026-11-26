@@ -529,39 +529,47 @@ typedef struct { u64 pawn, ack, pcm, vt, pending, main, controlled, owner, gs; i
 
 /* a plain object pointer: set, 8 aligned, no tag or high bits */
 static int gyro_ptr(u64 p){ return p && !(p&7) && p < (1ull<<48); }
-static int gyro_read64(u64 a, u64* v){
-  if(!gyro_ptr(a) || !guest_span_readable(a,8,8)) return 0;
-  *v=gr64(a); return 1;
+/* a field of an object: the base itself must be a plain pointer before any offset is added (a null or wrapping base never reaches
+   a readable address by its offset) */
+static int gyro_field64(u64 base, u64 off, u64* v){
+  if(!gyro_ptr(base) || off>=(1ull<<32) || !guest_span_readable(base+off,8,8)) return 0;
+  *v=gr64(base+off); return 1;
 }
 /* the engine's UObject IsA (main+0x451d700): the object's class (+0x10) has the wanted class in its base chain: the chain array
    (+0x30) entry at the wanted class's depth (+0x38, signed) is the wanted class's own chain struct (wanted class + 0x30, not the class).
-   The wanted class's own chain must name itself at its depth too, so a stale or wrong singleton never matches. */
+   The wanted class's own chain must name itself at its depth too, so a stale or wrong singleton never matches.
+   1 = is one, 0 = a well-formed object of another class, -1 = the object, its class or the wanted class is invalid or unreadable. */
 static int gyro_class_depth(u64 cls, u64* chain, i32* depth){
   if(!gyro_ptr(cls) || !guest_span_readable(cls+CLASS_BASE_CHAIN,16,8)) return 0;
   *chain=gr64(cls+CLASS_BASE_CHAIN); *depth=(i32)gr32(cls+CLASS_BASE_DEPTH);
   return gyro_ptr(*chain) && *depth>=0 && *depth<=GYRO_MAX_DEPTH;
 }
-static int gyro_isa(u64 obj, int which){
+static int gyro_isa3(u64 obj, int which){
   u64 want, cls, wchain, chain, entry; i32 wd, d;
-  if(!gyro_read64(g_cls_slot[which],&want) || !gyro_class_depth(want,&wchain,&wd)) return 0;
-  if(!gyro_read64(wchain+(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return 0;
-  if(!gyro_read64(obj+OBJ_CLASS,&cls) || !gyro_class_depth(cls,&chain,&d) || wd>d) return 0;
-  return gyro_read64(chain+(u64)wd*8,&entry) && entry==want+CLASS_BASE_CHAIN;
+  if(!g_cls_slot[which] || !gyro_field64(g_cls_slot[which],0,&want) || !gyro_class_depth(want,&wchain,&wd)) return -1;
+  if(!gyro_field64(wchain,(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return -1;
+  if(!gyro_field64(obj,OBJ_CLASS,&cls) || !gyro_class_depth(cls,&chain,&d)) return -1;
+  if(wd>d) return 0;   /* shallower than the wanted class: another class (its chain is not read past its own depth) */
+  if(!gyro_field64(chain,(u64)wd*8,&entry)) return -1;
+  return entry==want+CLASS_BASE_CHAIN;
 }
+static int gyro_isa(u64 obj, int which){ return gyro_isa3(obj,which)==1; }
 /* the shared pause: 1 paused, 0 running, -1 not found. Like AActor::GetWorld (GetTypedOuter<ULevel>, then OwningWorld). */
 static int gyro_paused(u64 pc, u64* gs_out){
   u64 seen[GYRO_MAX_OUTERS], o, level=0, world, gs;
-  if(!gyro_read64(pc+OBJ_OUTER,&o)) return -1;
+  if(!gyro_field64(pc,OBJ_OUTER,&o)) return -1;
   for(int n=0;n<GYRO_MAX_OUTERS && !level;n++){
     if(!gyro_ptr(o)) return -1;
     for(int k=0;k<n;k++) if(seen[k]==o) return -1;   /* a cycle */
     seen[n]=o;
-    if(gyro_isa(o,CLS_LEVEL)) level=o;
-    else if(!gyro_read64(o+OBJ_OUTER,&o)) return -1;
+    int is=gyro_isa3(o,CLS_LEVEL);
+    if(is<0) return -1;   /* an Outer with invalid class metadata is not skipped as "not a level" */
+    if(is) level=o;
+    else if(!gyro_field64(o,OBJ_OUTER,&o)) return -1;
   }
-  if(!level || !gyro_read64(level+LEVEL_WORLD,&world) || !gyro_read64(world+WORLD_GAME_STATE,&gs)) return -1;
+  if(!level || !gyro_field64(level,LEVEL_WORLD,&world) || !gyro_field64(world,WORLD_GAME_STATE,&gs)) return -1;
   *gs_out=gs;
-  if(!gyro_isa(gs,CLS_GAME_STATE) || !guest_span_readable(gs+GS_PAUSED,1,1)) return -1;
+  if(!gyro_isa(gs,CLS_GAME_STATE) || !guest_span_readable(gs+GS_PAUSED,1,1)) return -1;   /* gs checked as a plain pointer by IsA */
   return *GP(gs+GS_PAUSED)!=0;
 }
 static int gyro_gate(u64 pc, float dt, GateSeen* q){
@@ -584,7 +592,7 @@ static int gyro_gate(u64 pc, float dt, GateSeen* q){
   u64 actor= q->controlled? q->controlled : q->main;   /* GetControlledActor */
   if(actor!=q->main){
     if(!gyro_isa(actor,CLS_CONTROLLABLE_ACTOR)) return GATE_CONTROLLED_ACTOR;   /* before its controller field */
-    if(!gyro_read64(actor+CA_CONTROLLER,&q->owner)) return GATE_CONTROLLED_ACTOR;
+    if(!gyro_field64(actor,CA_CONTROLLER,&q->owner)) return GATE_CONTROLLED_ACTOR;
     if(q->owner!=pc) return GATE_WRONG_OWNER;
   }
   if(!pcm_ok) return GATE_NO_CAMERA;

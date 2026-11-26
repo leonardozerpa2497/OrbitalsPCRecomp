@@ -15,12 +15,13 @@ EXTENDED_READ = "  q->cinematic=*GP(pc+PC_CINEMATIC); q->main=gr64(pc+PC_MAIN_CH
 MUTATIONS = {
     "no controller class check": [(CLASS_CHECK, "")],
     "controller class checked after the game fields": [(CLASS_CHECK, ""), (EXTENDED_READ, EXTENDED_READ + CLASS_CHECK)],
-    "chain entry compared with the class": [("  return gyro_read64(chain+(u64)wd*8,&entry) && entry==want+CLASS_BASE_CHAIN;",
-                                             "  return gyro_read64(chain+(u64)wd*8,&entry) && entry==want;")],
-    "no wanted depth above actual depth check": [(" || wd>d) return 0;", ") return 0;")],
+    "chain entry compared with the class": [("  return entry==want+CLASS_BASE_CHAIN;", "  return entry==want;")],
+    "no wanted depth above actual depth check": [("  if(wd>d) return 0;", "")],
     "no negative depth check": [("*depth>=0 && ", "")],
     "no depth cap": [(" && *depth<=GYRO_MAX_DEPTH", "")],
-    "no wanted class self check": [("  if(!gyro_read64(wchain+(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return 0;\n", "")],
+    "no wanted class self check": [("  if(!gyro_field64(wchain,(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return -1;\n", "")],
+    "invalid Outer walked past as not a level": [("    if(is<0) return -1;", "")],
+    "field base not checked": [("  if(!gyro_ptr(base) || off>=(1ull<<32) ||", "  if(off>=(1ull<<32) ||")],
     "view target compared with the pawn": [("  if(q->vt!=actor) return GATE_VIEW_TARGET;", "  if(q->vt!=q->pawn) return GATE_VIEW_TARGET;")],
     "no MainCharacter fallback": [("u64 actor= q->controlled? q->controlled : q->main;", "u64 actor= q->controlled;")],
     "pending compared with the pawn": [("q->pending!=actor", "q->pending!=q->pawn")],
@@ -33,7 +34,7 @@ MUTATIONS = {
     "no game state type check": [("  if(!gyro_isa(gs,CLS_GAME_STATE) || !guest_span_readable(gs+GS_PAUSED,1,1)) return -1;",
                                   "  if(!guest_span_readable(gs+GS_PAUSED,1,1)) return -1;")],
     "no Outer bound": [("for(int n=0;n<GYRO_MAX_OUTERS && !level;n++){", "for(int n=0;!level;n++){ if(n>=GYRO_MAX_OUTERS) n=0;")],
-    "first Outer taken as the level": [("    if(gyro_isa(o,CLS_LEVEL)) level=o;", "    if(1) level=o;")],
+    "first Outer taken as the level": [("    if(is) level=o;", "    if(1) level=o;")],
 }
 
 

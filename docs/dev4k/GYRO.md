@@ -42,7 +42,8 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
     (main+0x451d700): the object's class (+0x10) has a base chain array (+0x30) and a signed depth (+0x38); the entry at the wanted
     class's depth must be the wanted class's chain struct, wanted class + 0x30 (not the class pointer). The wanted class's own chain
     must name itself at its depth, depths must be 0..256 and the wanted depth not above the actual one; every pointer is checked
-    (set, 8-aligned, below 2^48, readable). Singletons are only read, never initialized (no StaticClass call): an empty one closes
+    (set, 8-aligned, below 2^48, readable), and every object's base is checked before a field offset is added to it, so a null or
+    wrapping pointer never reaches readable memory through its offset. Singletons are only read, never initialized (no StaticClass call): an empty one closes
     the gate. The title's `OrbFrontEndPlayerController` is only 0x750 bytes, so none of the game fields below is read until this holds.
   - Pawn (+0x2e8) set and a plain pointer, AcknowledgedPawn (+0x358) the same, IgnoreLookInput (byte +0x33a) 0, cinematic mode bit
     (+0x4c0 mask 0x02; measured 0x09 / 0x109 in gameplay) clear, MainCharacter (+0x7b8) set.
@@ -52,7 +53,8 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
     measured equal to the controller for both players) must be this controller.
   - The PlayerCameraManager (+0x368) is readable, its ViewTarget.Target (+0x340) is that controlled actor and its
     PendingViewTarget.Target (+0xc00) is empty or the same actor.
-  - The shared pause is off: the controller's Outer chain (+0x20, at most 32 steps, a repeated object closes) to its `ULevel`
+  - The shared pause is off: the controller's Outer chain (+0x20, at most 32 steps, a repeated object closes, an Outer whose class
+    metadata is invalid closes rather than being walked past as "not a level") to its `ULevel`
     (main+0x9c51c88), the level's OwningWorld (+0xc0), the world's GameState (+0x1d8), which must be an `OBGameStateBase`
     (main+0x9cb7bf0) whose pause byte (+0x42b) is 0 (measured 1 while paused and 0 after resuming, for both players). The pause menu
     pointer (+0x880) is not used: only the player who paused has one, and it stays cached after resuming.
@@ -96,7 +98,9 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
   a cutscene camera as view target, the shared pause; malformed metadata (negative, 0x80000000 and over-cap depths on either class,
   a chain entry naming the class instead of its chain, chain null / misaligned / unreadable, a tagged class pointer, an empty or
   stale singleton, a malformed game state class); the world chain (no, unreadable or misaligned Outer, an Outer cycle, 40 Outers,
-  an unreadable one mid-chain, no level, no world, no or unreadable game state, an engine or other game state class, an unreadable
+  an unreadable one mid-chain, an Outer whose class is unreadable, tagged or malformed (with a world field, so neither walking
+  past it nor taking it as the level opens), a null or wrapping world, game state, Outer or controlled actor pointer whose field
+  offset lands on readable memory, no level, no world, no or unreadable game state, an engine or other game state class, an unreadable
   pause byte). Both ship roles and on foot open for both players; a shared pause closes both players and both reopen without a
   jump while P1's pause menu pointer stays cached; a shared pause during the synthetic test ends it INCONCLUSIVE; both players turn
   their own camera at once; no jump after a
@@ -114,7 +118,7 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
   open, closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE, no relock check, no window reset on a
   gap or a new controller, no abort on a gap, no drop of the ended test's turn, no running check at publication, no clear at an
   INCONCLUSIVE end) each fail at least one test.
-  The runner also builds 19 mutations of the new gate (no controller type check, the type check after the game fields, the chain
+  The runner also builds 21 mutations of the new gate (an invalid Outer walked past, a field base not checked, no controller type check, the type check after the game fields, the chain
   entry compared with the class, no wanted/actual depth comparison, no negative depth or cap check, no self check of the
   singleton, view target or pending compared with the pawn, no MainCharacter fallback, no controllable type, owner, main
   character, cinematic or pause check, an unknown game state accepted, no game state type check, no Outer bound, the first Outer

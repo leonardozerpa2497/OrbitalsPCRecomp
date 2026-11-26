@@ -259,6 +259,28 @@ static void outer_short_open(void){   /* 3 outers before the level: found */
 }
 static void outer_unreadable_mid_close(void){ outer_short_open(); bad_lo = OUTERS + 0x100 + OBJ_OUTER; bad_hi = bad_lo + 8; }
 static void outer_mid_open(void){ bad_lo = bad_hi = 0; outer_short_open(); }
+/* review of e5af407: an Outer whose class is invalid is not a "not a level" to walk past, and every base is checked before its
+   offset is added (a null or wrapping world or game state never reaches readable memory by its offset) */
+/* the invalid Outer also has a level's world field: taken either as "not a level" or as a level, the gate would open */
+static void outer_short_world(void){ outer_short_open(); gw64(OUTERS + 0x100 + LEVEL_WORLD, WORLD); }
+static void outer_class_unreadable_close(void){ outer_short_world(); bad_lo = OUTERS + 0x100 + OBJ_CLASS; bad_hi = bad_lo + 8; }
+static void outer_class_tagged_close(void){ outer_short_world(); gw64(OUTERS + 0x100 + OBJ_CLASS, cls(K_PACKAGE) | 1); }
+static void outer_class_malformed_close(void){ outer_short_world(); gw32(cls(K_PACKAGE) + 0x38, (u32)-1); }
+static void outer_class_open(void){ bad_lo = bad_hi = 0; make_classes(); outer_short_open(); }
+static void world_null_readable_close(void){ gw64(LEVEL + LEVEL_WORLD, 0); gw64(WORLD_GAME_STATE, GSTATE); }
+static void world_wraps_close(void){ gw64(LEVEL + LEVEL_WORLD, (u64)-0x100); gw64(WORLD_GAME_STATE - 0x100, GSTATE); }
+static void gs_wraps_close(void){   /* its class field and pause byte land on low memory that reads as a running OBGameStateBase */
+  u64 gs = (u64)-8; gw64(WORLD + WORLD_GAME_STATE, gs); gw64(gs + OBJ_CLASS, cls(K_BP_GS)); *GP(gs + GS_PAUSED) = 0;
+}
+static void level_wraps_close(void){   /* a level object of address 0 - 0x10: never reached, its Outer field wraps to a readable 0x10 */
+  gw64(pcs[0] + OBJ_OUTER, (u64)-0x10);
+}
+static void low_memory_open(void){ memset(GP(0), 0, 0x1000); world_open(); }
+static void ship_wraps_close(void){   /* ControlledActor 0 - 0x10: its class field wraps to address 0, which names a station class */
+  u64 a = (u64)-0x10; gw64(pcs[0] + PC_CONTROLLED_ACTOR, a); gw64(pcm_of(0) + PCM_VIEW_TARGET, a); gw64(a + OBJ_CLASS, cls(K_SHIP_PILOT));
+  gw64(a + CA_CONTROLLER, pcs[0]);
+}
+static void ship_wraps_open(void){ memset(GP(0), 0, 0x1000); make_pc(0, 0); }
 static void no_level_close(void){ object(LEVEL, K_PACKAGE, WORLD); }
 static void world_null_close(void){ gw64(LEVEL + LEVEL_WORLD, 0); }
 static void world_unreadable_close(void){ bad_lo = WORLD + WORLD_GAME_STATE; bad_hi = bad_lo + 8; }
@@ -568,6 +590,14 @@ int main(void){
   closed_then_open_without_jump("Outer cycle", outer_cycle_close, world_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("40 Outers before the level", outer_long_close, outer_short_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("an Outer in the chain unreadable", outer_unreadable_mid_close, outer_mid_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("an Outer's class unreadable", outer_class_unreadable_close, outer_class_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("an Outer's class tagged", outer_class_tagged_close, outer_class_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("an Outer's class malformed", outer_class_malformed_close, outer_class_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("null world with a readable field offset", world_null_readable_close, low_memory_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("world pointer wrapping to readable memory", world_wraps_close, low_memory_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("game state pointer wrapping to readable memory", gs_wraps_close, low_memory_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("Outer pointer wrapping", level_wraps_close, low_memory_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("controlled actor pointer wrapping", ship_wraps_close, ship_wraps_open, GATE_CONTROLLED_ACTOR);
   closed_then_open_without_jump("no level in the Outer chain", no_level_close, world_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("level without a world", world_null_close, world_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("world game state unreadable", world_unreadable_close, unreadable_open, GATE_NO_GAME_STATE);
