@@ -223,7 +223,7 @@ static void barrier_all(VkCommandBuffer cb) {
 static vkm_writeback g_wb[256]; static int g_nwb;
 static void wb_add(uint64_t addr, uint64_t size) {
     for (int i = 0; i < g_nwb; i++) if (g_wb[i].a == addr && g_wb[i].n == size) return;
-    if (g_nwb < 256) { g_wb[g_nwb].a = addr; g_wb[g_nwb].n = size; g_wb[g_nwb++].base = 0; }
+    if (g_nwb < 256) g_wb[g_nwb++] = (vkm_writeback){.a = addr, .n = size};
 }
 static void wb_flush(void) {
     vkm_gpu_writebacks(g_wb, g_nwb);
@@ -1801,7 +1801,7 @@ static void dispatch(const p_dispatch *dp) {
     if (!ds) return;
     barrier_all(cb);
     int snap = 0;
-    for (int i = 0; i < g_nwb; i++) snap |= (g_wb[i].base = vkm_wb_base(g_wb[i].a, g_wb[i].n)) != 0;   // the ranges before the shader: only the words it changes go back to guest memory
+    for (int i = 0; i < g_nwb; i++) snap |= vkm_wb_prepare(&g_wb[i]);   // the ranges before the shader: only the words it changes go back to guest memory
     // The snapshot copies read what the shader is about to write: the shader waits for them (write after read: an execution dependency is enough)
     if (snap) vk_mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe); g_last_pipe = VK_NULL_HANDLE;
