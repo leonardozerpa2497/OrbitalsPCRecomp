@@ -69,12 +69,13 @@ def prompt_fixture_program(dynamic):
 
 class CodegenDynamicCallTests(unittest.TestCase):
     def test_orbitals_icon_lookup_is_listed_for_the_runtimes_build(self):
-        self.assertEqual(codegen.DYNAMIC_CALLS[ORBITALS_MAIN], (0x40c5020, 0x40c5ce0))
+        self.assertEqual(codegen.DYNAMIC_CALLS[ORBITALS_MAIN], (0x40c5020, 0x40c5ce0, 0x40e13e0))
         with open(os.path.join(ROOT, 'runtime', 'orbitals_input.c')) as f: src = f.read()
         build = re.search(r'orbitals_build\[16\] = \{([^}]*)\}', src).group(1)
         self.assertEqual(bytes(int(x, 16) for x in build.split(',')).hex(), ORBITALS_MAIN)
         self.assertIn('ICON_LOOKUP=0x40c5ce0', src)
         self.assertIn('ICON_PROMPT=0x40c5020', src)
+        self.assertIn('PAD_IMAGE=0x40e13e0', src)
 
     def test_both_action_prompt_callers_go_through_the_dispatch_table(self):
         prog, callers, funcs = prompt_fixture_program(True)
@@ -108,6 +109,29 @@ class CodegenDynamicCallTests(unittest.TestCase):
                     if imm & 0x2000000: imm -= 0x4000000
                     self.assertEqual(off + imm * 4, target, '%s caller %x' % (fn, off)); calls += 1
             self.assertEqual(calls, 2, fn)
+        # the controller drawing: its two direct callers bl it, its own call bls the per-type lookup, the delegate takes its address
+        body = src[src.index('static void pad_image_install('):]
+        pairs = re.findall(r'\{(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\}', body[body.index('sig[]={'):body.index('};')])
+        self.assertGreaterEqual(len(pairs), 12)
+        bls = {}
+        for off, w in pairs:
+            off = int(off, 16); word = struct.unpack_from('<I', img, off)[0]
+            self.assertEqual(word, int(w, 16), 'pad_image_install %x' % off)
+            if word >> 26 == 0x25:
+                imm = word & 0x3ffffff
+                if imm & 0x2000000: imm -= 0x4000000
+                bls[off] = off + imm * 4
+        self.assertEqual(bls, {0x40e1400: 0x40e1700, 0x40b1500: 0x40e13e0, 0x40e1188: 0x40e13e0})
+        adr = struct.unpack_from('<I', img, 0x40e1168)[0]   # adr x2, main+0x40e13e0
+        imm = ((adr >> 5) & 0x7ffff) << 2 | (adr >> 29) & 3
+        self.assertEqual(adr & 0x9f00001f, 0x10000002); self.assertEqual(0x40e1168 + imm, 0x40e13e0)
+        # EGamepadType's values, from the enum's name table in main.bin
+        names = {}
+        for i in range(6):
+            ptr, val = struct.unpack_from('<QQ', img, 0x86eada0 + 16 * i)
+            names[img[ptr:img.index(b'\0', ptr)].decode()] = val
+        self.assertEqual(names, {'EGamepadType::XboxSeries': 0, 'EGamepadType::SonyDualShock': 1, 'EGamepadType::SonyDualSense': 2,
+                                 'EGamepadType::NintendoJoyCons': 3, 'EGamepadType::NintendoPro': 4, 'EGamepadType::None': 5})
 
     def test_listed_target_goes_through_the_dispatch_table(self):
         prog, caller, funcs = fixture_program(True)
@@ -398,6 +422,76 @@ int main(void){
 '''
 
 
+C_IMAGE_TEST = PRELUDE + r'''
+/* the controller drawing's stand-in: records the gamepad type it gets, then declares the widget dead (any later read counts) */
+enum { W=0x3000, WD=0x3400 };
+static int g_calls; static u64 g_type_seen; static int g_kill;
+void F_IMAGE(CPU* RESTRICT c, u64 e){ (void)e; g_calls++; g_type_seen=c->x[1]; if(g_kill){ g_dead_lo=W; g_dead_hi=W+0x200; }
+  c->x[0]=0x55; c->pc=c->x[30]; }
+GENERATED
+static int fails;
+#define CHECK(cond,...) do{ if(!(cond)){ fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } }while(0)
+typedef struct { u8 type; u64 tex; } IE;
+/* the widget's TMap<EGamepadType, UTexture2D*> at W+0x190: n elements, inline flags, one inline hash bucket chaining n-1 .. 0 */
+static void widget(const IE* e,int n){
+  memset(GP(W),0,0x200); memset(GP(WD),0,0x200); put64(W,0xabc);
+  put64(W+0x190,WD); put32(W+0x198,n); put32(W+0x19c,n); put32(W+0x1a0,(1u<<n)-1); put32(W+0x1b8,n); put32(W+0x1bc,128);
+  put32(W+0x1c0,0xffffffffu); put32(W+0x1c4,0); put32(W+0x1c8,n? n-1 : 0xffffffffu); put64(W+0x1d0,0); put32(W+0x1d8,1); g_mem[W+0x1e0]=0;
+  for(int i=0;i<n;i++){ g_mem[WD+0x18*i]=e[i].type; put64(WD+0x18*i+8,e[i].tex); put32(WD+0x18*i+0x10,i? i-1 : 0xffffffffu); }
+}
+static GuestFn disp[0x20]; static CPU g_cpu; static u8 g_mem_after[sizeof g_mem];
+static u64 run1(int caller,u64 w,u8 type,int want,int hooked){
+  CPU* c=&g_cpu; memset(c,0,sizeof *c); c->mem=g_mem; c->disp=disp; c->code_lo=BASE; c->code_hi=BASE+0x80;
+  memset(disp,0,sizeof disp); disp[0]=F_CALLA; disp[0x20/4]=F_CALLB; disp[PROMPT/4]= hooked? pad_image : F_IMAGE;
+  pad_image_orig=F_IMAGE; g_icon_want=want; g_icon_base=BASE;
+  c->x[0]=w; c->x[1]=0x1200|type; c->x[31]=0x4000;
+  g_calls=0; g_stale=0; g_kill=1; g_dead_lo=g_dead_hi=0;
+  (caller? F_CALLB : F_CALLA)(c, caller? BASE+0x20 : BASE);
+  g_dead_lo=g_dead_hi=0;
+  CHECK(g_calls==1,"original called once (%d)",g_calls);
+  CHECK(c->pc==BASE+(caller? 0x24 : 4),"returned to the caller (pc %llx)",(unsigned long long)c->pc);
+  CHECK(g_stale==0,"%d widget reads after the original returned",g_stale);
+  return g_type_seen;
+}
+/* unhooked and hooked: the original sees type expect (upper bits of x1 kept), registers other than x1 and guest memory unchanged */
+static void same(const char* what,int caller,const IE* e,int n,u8 type,int want,u8 expect){
+  widget(e,n); u64 t0=run1(caller,W,type,want,0); CPU c0=g_cpu; memcpy(g_mem_after,g_mem,sizeof g_mem);
+  widget(e,n); u64 t1=run1(caller,W,type,want,1);
+  CHECK(t0==(0x1200u|type),"%s: unhooked type %llx",what,(unsigned long long)t0);
+  CHECK(t1==(0x1200u|expect),"%s: type %llx, expected %x",what,(unsigned long long)t1,0x1200u|expect);
+  c0.x[1]=g_cpu.x[1];
+  CHECK(!memcmp(&c0,&g_cpu,sizeof c0),"%s: registers differ from the original's",what);
+  CHECK(!memcmp(g_mem,g_mem_after,sizeof g_mem),"%s: guest memory changed",what);
+}
+int main(void){
+  IE all[]={{4,0x6004},{3,0x6003},{2,0x6002},{1,0x6001},{0,0x6000}};
+  IE ds4[]={{4,0x6004},{1,0x6001}}; IE nulls[]={{4,0x6004},{2,0},{1,0},{0,0}}; IE sw[]={{4,0x6004},{3,0x6003}};
+  same("PlayStation Pro through caller A",0,all,5,4,1,2);
+  same("PlayStation Pro through caller B",1,all,5,4,1,2);
+  same("PlayStation JoyCons",0,all,5,3,1,2);
+  same("PlayStation DualShock when no DualSense",1,ds4,2,4,1,1);
+  same("Xbox through caller B",1,all,5,4,2,0);
+  same("Xbox missing keeps Nintendo",0,ds4,2,4,2,4);
+  same("NULL textures keep Nintendo (PlayStation)",0,nulls,4,4,1,4);
+  same("NULL texture keeps Nintendo (Xbox)",1,nulls,4,4,2,4);
+  same("Nintendo-only map keeps Nintendo",0,sw,2,4,1,4);
+  same("empty map keeps Nintendo",0,all,0,4,1,4);
+  same("non-Nintendo type passes through",0,all,5,1,2,1);
+  same("None passes through",1,all,5,5,1,5);
+  { widget(all,5); put32(W+0x198,6); put32(W+0x1b8,6); u64 t=run1(0,W,4,1,1); CHECK(t==0x1204,"count above capacity: %llx",(unsigned long long)t); }
+  { widget(all,5); put32(W+0x1c8,9); u64 t=run1(0,W,4,1,1); CHECK(t==0x1204,"hash index out of range: %llx",(unsigned long long)t); }
+  { widget(all,5); put32(WD+0x18*4+0x10,4); u64 t=run1(1,W,4,1,1); CHECK(t==0x1204,"hash chain cycle: %llx",(unsigned long long)t); }
+  { widget(all,5); put32(W+0x1a0,0x1b); put32(W+0x1c4,1); u64 t=run1(0,W,4,1,1); CHECK(t==0x1204,"freed entry still hashed: %llx",(unsigned long long)t); }
+  { widget(all,5); u64 t=run1(0,0,4,1,1); CHECK(t==0x1204,"NULL widget: %llx",(unsigned long long)t); }
+  { widget(all,5); u64 t=run1(0,W+4,4,1,1); CHECK(t==0x1204,"misaligned widget: %llx",(unsigned long long)t); }
+  { widget(all,5); u64 t=run1(0,sizeof g_mem-0x100,4,1,1); CHECK(t==0x1204,"unreadable widget: %llx",(unsigned long long)t); }
+  printf("logs %d\n",g_nlog);
+  if(fails){ printf("%d failed\n",fails); return 1; }
+  printf("ok\n"); return 0;
+}
+'''
+
+
 class ButtonLayoutRuntimeTests(unittest.TestCase):
     def build_and_run(self, dynamic):
         cc = os.environ.get('CC_HOST') or shutil.which('gcc') or shutil.which('clang')   # not 'cc': a launcher on some hosts
@@ -431,6 +525,34 @@ class ButtonLayoutRuntimeTests(unittest.TestCase):
             e = {k: v for k, v in os.environ.items() if k != 'SWR_ICON_TRACE'}
             e.update(env or {})
             return subprocess.run([exe], capture_output=True, text=True, env=e)
+
+    def build_image_and_run(self, dynamic, env=None):
+        cc = os.environ.get('CC_HOST') or shutil.which('gcc') or shutil.which('clang')
+        if not cc: self.skipTest('no C compiler')
+        prog, callers, funcs = prompt_fixture_program(dynamic)   # two callers bl the wrapped function at 0x40
+        gen = ''.join(codegen.emit_function(prog, f, funcs) for f in callers)
+        gen = (gen.replace(callers[0].name, 'F_CALLA').replace(callers[1].name, 'F_CALLB')
+               .replace(funcs[BASE + PROMPT].name, 'F_IMAGE'))
+        src = C_IMAGE_TEST.replace('GENERATED', 'enum { BASE=0x%X, PROMPT=0x%X };\nvoid F_CALLA(CPU* RESTRICT c, u64 e);\n'
+                                   'void F_CALLB(CPU* RESTRICT c, u64 e);\n%s' % (BASE, PROMPT, gen))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 't.c'); exe = os.path.join(d, 't')
+            with open(p, 'w') as f: f.write(src)
+            b = subprocess.run([cc, '-O1', '-w', '-I', os.path.join(ROOT, 'runtime'), p, '-o', exe], capture_output=True, text=True)
+            self.assertEqual(b.returncode, 0, b.stderr[-3000:])
+            e = {k: v for k, v in os.environ.items() if k != 'SWR_ICON_TRACE'}
+            e.update(env or {})
+            return subprocess.run([exe], capture_output=True, text=True, env=e)
+
+    def test_controller_image_gets_the_layout_type_only_when_the_widget_has_it(self):
+        r = self.build_image_and_run(True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertLessEqual(int(re.search(r'logs (\d+)', r.stdout).group(1)), 1, r.stdout)   # one-time "keeps" line, no trace
+
+    def test_direct_generated_image_call_bypasses_the_wrapper(self):
+        r = self.build_image_and_run(False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('FAIL: PlayStation Pro through caller A: type 1204', r.stdout)
 
     def test_action_prompt_gets_the_layout_icon_of_the_same_key(self):
         r = self.build_prompt_and_run(True)
