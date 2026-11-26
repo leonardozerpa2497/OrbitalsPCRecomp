@@ -34,3 +34,11 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 ## Next steps (not done)
 - CommonUI accept: find where the engine reads `bSwapForwardAndBackButtons` / `GetGamepadAcceptKey` in the binary and patch
   the value at start (a data patch like the redirect one), then `button_accept_bottom` can become the PlayStation default.
+
+## Review notes (Codex, 2026-11-26)
+- The memory scan now runs under the runtime's memory lock per 1 MB chunk (no unmap during the read) and only patches maps
+  whose four textures belong to the texture class learned at the first full match.
+- Open for `button_accept_bottom` (why it stays experimental): the redirect maps are emptied by writing the TSparseArray
+  counters from another thread (not transactional with the game's readers); the TSet hash buckets are left as they were, so a
+  later Add on the same map could misbehave (the game is not seen adding to it after load); the virtual-function wrappers add a
+  check to every call of those shared UObject functions.
