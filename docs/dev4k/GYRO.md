@@ -69,10 +69,17 @@ until it is moved out.
   viewing another pawn, no camera manager) turns nothing for 1.1 s of a 90 deg/s turn, still runs the game's UpdateRotation, logs
   the closed gate and the dropped turn, and opening it causes no jump; both players turn their own camera at once; no jump after a
   2 s pause or DeltaTime 0 frames; the synthetic test starts only after 3 s of an unbroken open gate and passes, ends
-  INCONCLUSIVE (never PASS) when the gate closes mid-test, and FAILs when the engine drops the input. Mutations (gate always open,
-  closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE) each fail at least one test.
-- Synthetic test and the gate: it starts only after 3 s of continuous open gate (the 3 s start over whenever it closes); if the
-  gate closes or another controller takes the player while it runs, it logs `gyro test: INCONCLUSIVE (...)` and gives no result.
+  INCONCLUSIVE (never PASS) when the gate closes mid-test, and FAILs when the engine drops the input. Review cases: the 3 s
+  window starts over after an UpdateRotation gap (2.4 s open + 3.2 s paused, and a 128 ms gap) and for a new controller on the
+  same player (2.4 s old + 0.8 s new), and is per player (a closed P2 does not hold P1 back); a pause while running or settling
+  ends INCONCLUSIVE; a game-thread end landing while the frontend thread is inside a synthetic sample (test_lock let go; a clock
+  hook in the test places it deterministically, first sample or a later one) stays INCONCLUSIVE, stops the generator there and
+  its turn never reaches the camera, nor a new controller's. The earlier build fails 15 checks of these. Mutations (gate always
+  open, closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE, no relock check, no window reset on a
+  gap or a new controller, no abort on a gap, no drop of the ended test's turn) each fail at least one test.
+- Synthetic test and the gate: it starts only after 3 s of continuous open gate on one player's controller (the 3 s start over
+  whenever it closes, UpdateRotation stops for over 100 ms or another controller takes the player); once it runs, any such break
+  logs `gyro test: INCONCLUSIVE (...)`, gives no result, drops the waiting synthetic turn and cannot be resumed.
 - Real pad still 60 s (`gyro_log=1`): resumed after the owner connected the pad; logs and final measured drift are recorded
   in the run report. Initial run exposed the clock rollback above; its uncalibrated P1 zero-drift lines are not a pass.
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.

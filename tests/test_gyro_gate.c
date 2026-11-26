@@ -25,7 +25,13 @@ int guest_span_readable(u64 a, u64 n, u64 al){
   return a + n <= bad_lo || a >= bad_hi;
 }
 static u64 clock_ns;
-u64 plat_ns(void){ return clock_ns; }
+/* abort_countdown: the n-th clock read from now ends the test as the game thread would (INCONCLUSIVE under test_lock), to land that
+   end exactly where the frontend thread has let go of test_lock inside its synthetic sample loop */
+static int abort_countdown;
+u64 plat_ns(void){
+  if(abort_countdown && --abort_countdown == 0){ test_lock(); test_inconclusive("simulated game-thread end during a synthetic sample"); test_unlock(); }
+  return clock_ns;
+}
 GuestFn* g_disp; u64 g_code_lo = 0x80000, g_code_hi = 0x80100;
 static double rd(u64 a){ double d; memcpy(&d, GP(a), 8); return d; }
 static void wd(u64 a, double d){ memcpy(GP(a), &d, 8); }
@@ -58,7 +64,7 @@ static double cam_pitch(int i){ return rd(pcs[i] + PC_CONTROL_ROTATION); }
 static void reset(void){
   memset(g_mem, 0, MEM); memset(P, 0, sizeof P); memset(Acc, 0, sizeof Acc); memset(Gs, 0, sizeof Gs); memset(&T, 0, sizeof T);
   memset(rin_yaw, 0, sizeof rin_yaw); memset(rin_pitch, 0, sizeof rin_pitch);
-  add_calls = orig_calls = engine_drops = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
+  add_calls = orig_calls = engine_drops = abort_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
   G.mode = 1; G.sens_x = G.sens_y = 1.5f; G.tightening = 3; G.invert = 0; G.test = 0; G.log = 0; G.button = 20; G.button_toggle = 0;
   clock_ns = 5000000000000ull;
   make_pc(0, 0); make_pc(1, 1);
@@ -185,6 +191,101 @@ static void test_synthetic_engine_drop_fails(void){
   CHECK(T.state == 4 && logged("-> FAIL") && !logged("-> PASS"), "a camera that did not turn must fail:\n%s", logbuf);
 }
 
+/* review cases: the 3 s window is broken by an UpdateRotation gap and by a new controller, and a test that runs is ended for good
+   by a gap or by the game thread while the frontend thread is in a synthetic sample */
+static void test_wait_window_broken_by_pause(void){
+  reset(); G.mode = 0; T.state = 1;
+  frames(150, 1);   /* 2.4 s open */
+  frames(200, 0);   /* 3.2 s paused: no UpdateRotation */
+  tick(0, 0.016f);
+  CHECK(T.state == 1, "2.4 s open + 3.2 s without UpdateRotation started the test (state %d)", T.state);
+  frames(150, 1);
+  CHECK(T.state == 1, "the window counted time from before the pause (state %d)", T.state);
+  frames(50, 1);
+  CHECK(T.state == 2, "the test did not start after 3 s unbroken after the pause (state %d)", T.state);
+  frames(200, 1);
+  CHECK(T.state == 4 && logged("-> PASS") && !logged("INCONCLUSIVE"), "after a pause before the start the test must still pass:\n%s", logbuf);
+}
+static void test_wait_window_broken_by_short_gap(void){   /* a 128 ms gap is a break too */
+  reset(); G.mode = 0; T.state = 1;
+  frames(150, 1); frames(8, 0); frames(40, 1);
+  CHECK(T.state == 1, "a 128 ms UpdateRotation gap did not restart the 3 s (state %d)", T.state);
+}
+static void test_wait_window_broken_by_controller_change(void){
+  reset(); G.mode = 0; T.state = 1;
+  frames(150, 1);   /* 2.4 s on the old controller */
+  make_pc(2, 0);    /* a new controller with ControllerId 0, the old one stops */
+  frames(50, 4);    /* 0.8 s on the new one */
+  CHECK(T.state == 1, "the 3 s window carried over to a new controller (state %d)", T.state);
+  frames(150, 4);
+  CHECK(T.state == 2 && T.pc == pcs[2], "the new controller did not start after its own 3 s (state %d)", T.state);
+}
+static void test_wait_window_per_player(void){   /* P2 closed does not break P1's window */
+  reset(); G.mode = 0; T.state = 1;
+  *GP(pcs[1] + PC_IGNORE_LOOK) = 1;
+  frames(200, 3);
+  CHECK(T.state == 2 && T.slot == 0 && T.pc == pcs[0], "P1 did not start beside a closed P2 (state %d slot %d)", T.state, T.slot);
+}
+static void ended_for_good(const char* name){
+  frames(300, 1);
+  CHECK(T.state == 4 && logged("INCONCLUSIVE") && !logged("PASS") && !logged("FAIL"), "%s: must end INCONCLUSIVE for good:\n%s", name, logbuf);
+}
+static void test_pause_while_running_is_inconclusive(void){
+  reset(); G.mode = 0; T.state = 1;
+  frames(220, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  frames(20, 0); tick(0, 0.016f);
+  CHECK(T.state == 4 && logged("no UpdateRotation for"), "a pause while running:\n%s", logbuf);
+  ended_for_good("pause while running");
+}
+static void test_pause_while_settling_is_inconclusive(void){
+  reset(); G.mode = 0; T.state = 1;
+  for(int k = 0; k < 400 && T.state != 3; k++) frame(1, 0.016f);
+  CHECK(T.state == 3, "not settling (state %d)", T.state);
+  frames(200, 0); tick(0, 0.016f);
+  CHECK(T.state == 4 && logged("INCONCLUSIVE") && !logged("PASS"), "a pause while settling:\n%s", logbuf);
+  ended_for_good("pause while settling");
+}
+static void test_end_during_synthetic_sample_stays(void){
+  reset(); G.mode = 0; T.state = 1;
+  frames(200, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  while(T.state == 2 && T.next_sample - T.t0 < 1950000000ull) frame(1, 0.016f);
+  CHECK(T.state == 2, "ended early (state %d)", T.state);
+  clock_ns += 50000000ull;   /* this call's samples cross 2 s: left alone the loop would go on to settling (state 3) */
+  /* the frontend reads the clock once, then once per synthetic sample: 2 = inside the first sample, with test_lock let go */
+  abort_countdown = 2;
+  orbitals_gyro_pad(0, 100, 0x054c, 0x0ce6, 0, 0, NULL, 0, 1, 1);
+  CHECK(abort_countdown == 0, "the simulated end did not land inside a synthetic sample (%d left)", abort_countdown);
+  CHECK(T.state == 4, "the frontend thread overwrote INCONCLUSIVE with state %d:\n%s", T.state, logbuf);
+  double before = cam_yaw(0); int calls = add_calls;
+  clock_ns += 16000000ull; tick(0, 0.016f);
+  CHECK(add_calls == calls && cam_yaw(0) == before, "the ended test's synthetic turn reached the camera (%.4f deg)", cam_yaw(0) - before);
+  ended_for_good("end during a synthetic sample");
+}
+static void test_end_inside_sample_late_in_loop(void){   /* several samples due: the end lands in a later one, the loop stops there */
+  reset(); G.mode = 0; T.state = 1;
+  frames(200, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  clock_ns += 40000000ull;   /* about 10 samples due in one call */
+  double want = T.want_yaw;
+  abort_countdown = 4;       /* the third sample */
+  orbitals_gyro_pad(0, 100, 0x054c, 0x0ce6, 0, 0, NULL, 0, 1, 1);
+  CHECK(T.state == 4 && abort_countdown == 0, "state %d countdown %d", T.state, abort_countdown);
+  CHECK(fabs(T.want_yaw - want) < 3.5 * 0.004 * 90 * 1.5, "samples kept coming after the end: %.4f deg", T.want_yaw - want);
+  ended_for_good("end in a later synthetic sample");
+}
+static void test_controller_change_drops_synthetic_turn(void){   /* the ended test's waiting turn never turns the new controller */
+  reset(); G.mode = 0; T.state = 1;
+  frames(220, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  make_pc(2, 0);
+  frame(4, 0.016f);
+  CHECK(T.state == 4 && logged("another player controller"), "a new controller while running:\n%s", logbuf);
+  CHECK(cam_yaw(2) == 0, "the synthetic turn reached the new controller: %.4f deg", cam_yaw(2));
+  ended_for_good("controller change while running");
+}
+
 int main(void){
   g_mem = calloc(1, MEM);
   static GuestFn disp[64]; g_disp = disp;
@@ -204,6 +305,15 @@ int main(void){
   test_synthetic_waits_for_continuous_gate();
   test_synthetic_gate_closes_is_inconclusive();
   test_synthetic_engine_drop_fails();
+  test_wait_window_broken_by_pause();
+  test_wait_window_broken_by_short_gap();
+  test_wait_window_broken_by_controller_change();
+  test_wait_window_per_player();
+  test_pause_while_running_is_inconclusive();
+  test_pause_while_settling_is_inconclusive();
+  test_end_during_synthetic_sample_stays();
+  test_end_inside_sample_late_in_loop();
+  test_controller_change_drops_synthetic_turn();
   printf(failures ? "%d FAILED\n" : "all gyro gate tests passed\n", failures);
   return failures != 0;
 }

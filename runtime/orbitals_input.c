@@ -326,7 +326,7 @@ static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_
    through the same processing as the pad's samples (pad samples are left out meanwhile) */
 static struct {
   int state;            /* 0 idle, 1 waiting for a player that can look, 2 running, 3 settling, 4 done */
-  int slot; u64 pc, t0, next_sample, seen_ns;   /* pc: the player controller under test */
+  int slot; u64 pc, t0, next_sample;   /* pc: the player controller under test */
   double want_yaw, want_pitch;          /* integral x sensitivity, camera degrees (UE signs) */
   double applied_yaw, applied_pitch;    /* given to AddYawInput / AddPitchInput */
   double cam_yaw, cam_pitch;            /* ControlRotation change measured around UpdateRotation */
@@ -405,10 +405,12 @@ void orbitals_gyro_pad(int s, u32 id, u16 vendor, u16 product, u32 buttons, u16 
   int active= allowed && G.mode && !(held && !G.button_toggle) && !(G.button_toggle && g->toggled_off) && (G.mode!=2 || zl>7710);
   /* test: synthetic samples on the slot of the player under test, the pad's own samples are left out */
   test_lock();
-  int testing= T.state==2 && T.slot==s;
+  int testing= T.state==2 && T.slot==s, ended=0;
   if(testing){
     if(!T.next_sample){ T.next_sample=now; T.t0=now; g->last_t=0; }
     for(;T.next_sample<=now;T.next_sample+=4000000ull){
+      /* the lock is let go around gyro_sample: the game thread may have ended the test meanwhile (INCONCLUSIVE); that end stays */
+      if(T.state!=2 || T.slot!=s){ ended=1; break; }
       u64 since=T.next_sample-T.t0;
       PadMotion sm={T.next_sample,{0,0,0},{0,9.80665f,0}};
       if(since<1000000000ull) sm.gyro[1]=(float)(90.0/RAD2DEG);
@@ -418,6 +420,7 @@ void orbitals_gyro_pad(int s, u32 id, u16 vendor, u16 product, u32 buttons, u16 
     }
   }
   test_unlock();
+  if(ended) acc_clear(s);   /* the synthetic turn of an ended test never reaches the camera */
   if(testing) return;
   if(!allowed) acc_clear(s);
   if(!has_gyro) return;
@@ -479,8 +482,9 @@ static int gyro_gate(u64 pc, float dt, GateSeen* q){
   if(!(dt>0)) return GATE_NO_TIME;
   return GATE_OPEN;
 }
-/* per player, game thread only: the gate seen last, the previous UpdateRotation and (gyro_log) the turn dropped while closed */
-static struct { u64 pc; int reason, logged; u64 last_ns, drop_t0; double drop_yaw, drop_pitch; } Gs[SLOTS];
+/* per player, game thread only: the gate seen last, the previous UpdateRotation, (gyro_log) the turn dropped while closed
+   and since when its gate has been open without a break (no close, no UpdateRotation gap over 100 ms, the same controller) */
+static struct { u64 pc; int reason, logged; u64 last_ns, open_since, drop_t0; double drop_yaw, drop_pitch; } Gs[SLOTS];
 
 static void test_inconclusive(const char* why){   /* under test_lock */
   T.state=4; LOG("gyro test: INCONCLUSIVE (%s); no result\n",why);
@@ -500,25 +504,30 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
         (unsigned long long)q.vt,(unsigned long long)q.pending,q.ignore,dt);
   /* UpdateRotation stops while the game is paused (the paused tick skips PlayerTick): the turn waiting from before such a gap is
      dropped, as gyro_sample already drops one nobody took for 100 ms */
-  int gap= Gs[id].last_ns && now-Gs[id].last_ns>100000000ull;
-  if(G.log && Gs[id].last_ns && now-Gs[id].last_ns>200000000ull) LOG("gyro gate: P%d UpdateRotation again after %.0f ms\n",id+1,(now-Gs[id].last_ns)/1e6);
+  u64 gap_ns= Gs[id].last_ns? now-Gs[id].last_ns : 0;
+  int gap= gap_ns>100000000ull;
+  if(G.log && gap_ns>200000000ull) LOG("gyro gate: P%d UpdateRotation again after %.0f ms\n",id+1,gap_ns/1e6);
+  if(!open) Gs[id].open_since=0;
+  else if(!Gs[id].open_since || gap || Gs[id].pc!=pc) Gs[id].open_since=now;
   Gs[id].pc=pc; Gs[id].reason=reason; Gs[id].logged=1; Gs[id].last_ns=now;
+  int ended=0;
   test_lock();
-  if(T.state==1 && (G.mode==0 || id==T.slot)){   /* starts after 3 s of an open gate without a break */
-    if(!open) T.seen_ns=0;
-    else if(!T.seen_ns) T.seen_ns=now;
-    else if(now-T.seen_ns>3000000000ull){ T.slot=id; T.pc=pc; T.state=2; LOG("gyro test: start on ControllerId %d\n",id); }
+  if(T.state==1 && (G.mode==0 || id==T.slot) && Gs[id].open_since && now-Gs[id].open_since>3000000000ull){   /* 3 s unbroken open gate */
+    T.slot=id; T.pc=pc; T.state=2; LOG("gyro test: start on ControllerId %d\n",id);
   }
   int measure= T.slot==id && (T.state==2 || T.state==3);
-  if(measure){
-    if(pc!=T.pc){ test_inconclusive("another player controller took this player"); measure=0; }
-    else if(!open){ char why[96]; snprintf(why,sizeof why,"the gate closed during the test: %s",gate_reason[reason]); test_inconclusive(why); measure=0; }
-    else if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)){ test_inconclusive("ControlRotation unreadable"); measure=0; }
+  if(measure){   /* any break once it runs ends it INCONCLUSIVE, for good */
+    char why[96]="";
+    if(pc!=T.pc) snprintf(why,sizeof why,"another player controller took this player");
+    else if(gap) snprintf(why,sizeof why,"no UpdateRotation for %.0f ms during the test",gap_ns/1e6);
+    else if(!open) snprintf(why,sizeof why,"the gate closed during the test: %s",gate_reason[reason]);
+    else if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)) snprintf(why,sizeof why,"ControlRotation unreadable");
+    if(why[0]){ test_inconclusive(why); measure=0; ended=1; }
   }
   test_unlock();
   double yaw=0, pitch=0;
   acc_lock(id); yaw=Acc[id].yaw; pitch=Acc[id].pitch; Acc[id].yaw=Acc[id].pitch=0; __atomic_store_n(&Acc[id].taken_ns,now,__ATOMIC_RELAXED); acc_unlock(id);
-  if(!open || gap){   /* dropped, never kept for later */
+  if(!open || gap || ended){   /* dropped, never kept for later (nor the synthetic turn of an ended test) */
     if(G.log && (yaw || pitch)){
       if(!Gs[id].drop_t0) Gs[id].drop_t0=now;
       Gs[id].drop_yaw+=fabs(yaw); Gs[id].drop_pitch+=fabs(pitch);
