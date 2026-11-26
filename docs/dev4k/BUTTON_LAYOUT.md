@@ -12,7 +12,10 @@ Run `controls-native-gate-xbox` shows RT for both co-op players and X for player
 returns with the right face button (B), then opens pause again and selects Resume with the bottom face button (A).
 The corresponding `-coop`, `-paused`, `-back-result` and `-resumed` screenshots were inspected.
 `xbox-settings-clean_s.png` is actually the main menu with A Select: the timed navigation ran during a transition.
-It is not Settings evidence. Xbox Settings remains pending. The eight-run Nintendo/PlayStation comparison and installed
+It is not Settings evidence. The later manually inspected `xbox-settings-verified_s.png` shows A Select/B Back in Settings;
+P1's bottom button entered it and right button returned to the main menu. P2's right button did not navigate this front-end screen
+before joining co-op; P2's in-game pause/back/resume flow did work. Do not count the front-end P2 attempt as a pass.
+The eight-run Nintendo/PlayStation comparison and installed
 Windows launcher evidence are recorded in [LAYOUT_BENCH.md](LAYOUT_BENCH.md); no consistent FPS regression was measured.
 
 Before this fix, the 08:30-08:44 PC runs with PlayStation selected showed Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
@@ -93,7 +96,7 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   The runtime option is off by default. The installed launcher ties bottom acceptance to Xbox/PlayStation.
 
 ## Next steps (not done)
-- Finish Xbox Settings capture.
+- Check player two's Settings flow from its own in-game pause menu; the pre-join front-end ignores its navigation.
   The module has been regenerated, the action-prompt trace and real replacement glyphs observed.
   Validate on-foot jump and remaining gameplay interactions without advancing the fixed benchmark save.
 
