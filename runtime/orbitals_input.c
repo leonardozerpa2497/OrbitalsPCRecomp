@@ -566,7 +566,7 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)){ test_inconclusive("ControlRotation unreadable after UpdateRotation"); test_unlock(); return; }
   double dp=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION)-cp0), dy=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION+8)-cy0);
   T.cam_pitch+=dp; T.cam_yaw+=dy;
-  if(T.state==3 && after-T.t0>300000000ull){
+  if(T.state==3 && after>T.t0 && after-T.t0>300000000ull){
     T.state=4;
     double ey= T.want_yaw? 100.0*(T.cam_yaw-T.want_yaw)/T.want_yaw : 0, ep= T.want_pitch? 100.0*(T.cam_pitch-T.want_pitch)/T.want_pitch : 0;
     LOG("gyro test: yaw integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_yaw,T.applied_yaw,T.cam_yaw,ey,fabs(ey)<=2? "PASS" : "FAIL");

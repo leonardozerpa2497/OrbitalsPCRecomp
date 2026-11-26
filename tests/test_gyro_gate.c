@@ -27,8 +27,14 @@ int guest_span_readable(u64 a, u64 n, u64 al){
 static u64 clock_ns;
 /* abort_countdown: the n-th clock read from now ends the test as the game thread would (INCONCLUSIVE under test_lock), to land that
    end exactly where the frontend thread has let go of test_lock inside its synthetic sample loop */
-static int abort_countdown;
+static int abort_countdown, settle_countdown;
 u64 plat_ns(void){
+  u64 captured=clock_ns;
+  if(settle_countdown && --settle_countdown==0){
+    clock_ns++;
+    orbitals_gyro_pad(0,100,0x054c,0x0ce6,0,0,NULL,0,1,1);
+    return captured;
+  }
   if(abort_countdown && --abort_countdown == 0){ test_lock(); test_inconclusive("simulated game-thread end during a synthetic sample"); test_unlock(); }
   return clock_ns;
 }
@@ -64,7 +70,7 @@ static double cam_pitch(int i){ return rd(pcs[i] + PC_CONTROL_ROTATION); }
 static void reset(void){
   memset(g_mem, 0, MEM); memset(P, 0, sizeof P); memset(Acc, 0, sizeof Acc); memset(Gs, 0, sizeof Gs); memset(&T, 0, sizeof T);
   memset(rin_yaw, 0, sizeof rin_yaw); memset(rin_pitch, 0, sizeof rin_pitch);
-  add_calls = orig_calls = engine_drops = abort_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
+  add_calls = orig_calls = engine_drops = abort_countdown = settle_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
   G.mode = 1; G.sens_x = G.sens_y = 1.5f; G.tightening = 3; G.invert = 0; G.test = 0; G.log = 0; G.button = 20; G.button_toggle = 0;
   clock_ns = 5000000000000ull;
   make_pc(0, 0); make_pc(1, 1);
@@ -324,6 +330,17 @@ static void test_end_matrix(void){   /* running and settling x closed gate, gap,
   }
 }
 
+/* The frontend can enter settling after the game thread captured its clock but before it acquires test_lock. */
+static void test_settle_after_clock_snapshot(void){
+  reset(); G.mode=0; T.state=1; frames(200,1);
+  while(clock_ns<T.t0+1980000000ull) frame(1,0.016f);
+  clock_ns=T.t0+2000000000ull-1;
+  settle_countdown=2; tick(0,0.016f);
+  CHECK(T.state==3 && !logged("yaw integral"), "settling finished with a future start: state=%d pending_pitch=%.6f", T.state, Acc[0].pitch);
+  frames(30,1);
+  CHECK(T.state==4 && logged("-> PASS"), "settling did not finish after consuming pending motion:\n%s", logbuf);
+}
+
 int main(void){
   g_mem = calloc(1, MEM);
   static GuestFn disp[64]; g_disp = disp;
@@ -355,6 +372,7 @@ int main(void){
   test_end_matrix();
   test_end_inside_last_due_sample();
   test_end_after_publication_clears_it();
+  test_settle_after_clock_snapshot();
   printf(failures ? "%d FAILED\n" : "all gyro gate tests passed\n", failures);
   return failures != 0;
 }
