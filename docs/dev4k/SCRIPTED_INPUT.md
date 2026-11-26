@@ -48,6 +48,12 @@ with Xbox or PlayStation (bottom accept). The second script preserves every time
 changes only face-button mask1 to2. It is the script used for the observed PlayStation/Xbox checks and layout/flight
 benchmarks. Use the fixed copied benchmark profile; progress to other areas only in a separate validation copy.
 
+At nightly close, `script_file` is removed from the installed baseINI (it was absent from the original), and the input file
+is neutralized. This prevents script mode from making two controllers appear connected during normal play.
+For a repeat bench on the copied test profile, pass `script_file=C:\llm\tmp\orb\input.txt` as an extraINI argument to
+`bench.sh`; its temporary marker block is removed after the run. Manual `orb.sh press` requires that key in the running
+session. Do not enable it in the owner's profile just to reproduce a benchmark.
+
 ## The script clock
 By default real time minus the time the renderer spent waiting for shaders to be translated, so a held stick moves a
 character as far in a first session as in later ones. `SWR_INPUT_CLOCK=game`: the clock moves only when the game presents a

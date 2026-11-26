@@ -33,3 +33,7 @@ The overlay is under the kit's `patches/night-sync1`; the original game pak is u
 The previous INI is backed up at desktop `orbitals-night-backup-20261126/measured-config-114822/Orbitals.ini`.
 Restore that INI with the game closed to undo this performance configuration. Runtime code remains reversible
 through the initial nightly executable/source backup; the selected device-memory option is off by default in code.
+At close, input automation is disabled by removing `script_file` from the installed baseINI and neutralizing its input file.
+The owner's original profile/settings and1620p choice are preserved, with gyroOff; all four owner save files match the initial
+backup bySHA256. Restoring the initial root `Orbitals.ini` in the nightly backup restores the original configuration without
+the benchmark input key. Test profiles and evidence remain separate for reproducibility.
