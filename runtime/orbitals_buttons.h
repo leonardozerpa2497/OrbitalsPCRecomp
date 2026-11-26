@@ -1,6 +1,6 @@
 /* Orbitals PC Recomp, based on SwitchRecomp by MZ Labs. AGPL-3.0, see LICENSE.txt and NOTICE.txt. */
 /* Button layout pieces that only touch the CPU state and guest memory, shared by runtime/orbitals_input.c and
-   tests/test_button_layout.c. The includer provides CPU, GuestFn, GP, gr32, gr64, LOG, PERM_R / PERM_RW,
+   tests/test_button_layout.py. The includer provides CPU, GuestFn, GP, gr32, gr64, LOG, PERM_R / PERM_RW,
    guest_span_readable, mem_with_range, g_ei_vtable and mem_span_ok_locked (inside mem_with_range only). */
 #ifndef ORBITALS_BUTTONS_H
 #define ORBITALS_BUTTONS_H
@@ -10,14 +10,20 @@
    A Switch request (3) and, for PlayStation, the native widget's Xbox fallback (2) ask for the layout's platform first; when that
    finds no entry or a NULL texture, *out and the arguments are put back and the original platform is asked. */
 static GuestFn icon_lookup_orig; static int g_icon_want;   /* 1 Playstation, 2 Xbox */
+static u64 g_icon_base;   /* main's base, only to print callers as main+offset */
+/* SWR_ICON_TRACE (environment, read once): opt-in, bounded evidence of which caller reaches which wrapper; installing a wrapper does
+   not prove a prompt goes through it. Off by default: no logging on these paths. */
+static int icon_trace(void){
+  static int trace=-1;
+  int t=__atomic_load_n(&trace,__ATOMIC_RELAXED);
+  if(t<0){ t=getenv("SWR_ICON_TRACE")!=NULL; __atomic_store_n(&trace,t,__ATOMIC_RELAXED); }
+  return t;
+}
 static void icon_lookup(CPU* c, u64 entry){
   u8 plat=(u8)c->x[2];
-  /* Opt-in, bounded evidence of the actual caller/platform; installation alone does not prove a prompt uses this lookup. */
-  static int trace=-1; static unsigned traced;
-  int tracing=__atomic_load_n(&trace,__ATOMIC_RELAXED);
-  if(tracing<0){ tracing=getenv("SWR_ICON_TRACE")!=NULL; __atomic_store_n(&trace,tracing,__ATOMIC_RELAXED); }
-  if(tracing && __atomic_fetch_add(&traced,1,__ATOMIC_RELAXED)<16)
-    LOG("Orbitals: icon lookup reached: platform %u, wanted %d, caller %llx\n",plat,g_icon_want,(unsigned long long)c->x[30]);
+  static unsigned traced;
+  if(icon_trace() && __atomic_fetch_add(&traced,1,__ATOMIC_RELAXED)<16)
+    LOG("Orbitals: icon lookup reached: platform %u, wanted %d, caller main+%llx\n",plat,g_icon_want,(unsigned long long)(c->x[30]-g_icon_base));
   if(!(plat==3 || (plat==2 && g_icon_want==1))){ icon_lookup_orig(c,entry); return; }
   u64 x0=c->x[0], x1=c->x[1], x3=c->x[3], lr=c->x[30], out0=gr64(x3);
   c->x[2]=(u64)g_icon_want;
@@ -27,6 +33,99 @@ static void icon_lookup(CPU* c, u64 entry){
   memcpy(GP(x3),&out0,8);
   c->x[0]=x0; c->x[1]=x1; c->x[2]=plat; c->x[3]=x3; c->x[30]=lr;
   icon_lookup_orig(c,entry);
+}
+
+/* The action prompt, main+0x40c5020 (UInputAction*, asset, UTexture2D** pad, UTexture2D** keyboard, bool* label, FKey* label key,
+   player) -> bool: the path the title / menus / lobby / settings / co-op prompts actually take (both callers, main+0x40c4ed0 and
+   main+0x40d3990, reach it with a direct bl). For each key mapped to the action it looks the key up in the asset's InputIcons itself
+   (the same two-level map as icon_lookup, inlined) with the platform hard-coded: a gamepad key asks Switch 3 and writes the texture
+   to *pad; a keyboard key asks Desktop 0 and writes *keyboard, or, without one, the asset's default texture, *label = true and a copy
+   of the key into *label key (so that FKey is the keyboard key, never the gamepad one). Nothing it returns names the gamepad key.
+   icon_prompt therefore maps the Switch texture it wrote back to the layout's texture of the SAME key through the asset's own map:
+   before the call (the asset is the caller's argument, live exactly as long as the original's own reads of it) it lists, for every
+   live key with a non-NULL Switch texture, that key's PlayStation / Xbox texture; after the call it reads only *pad, the caller's
+   output slot. A Switch texture whose keys disagree (different, missing or NULL replacements), a malformed map or a slot the call did
+   not change keep the Switch texture. Registers, the return value, *keyboard, *label, the label key (and its reference count) are
+   the original's: the only write is *pad, and only to a texture of the same asset. */
+enum { ICON_PAIRS=256, ICON_KEYS_MAX=4096, ICON_PLATS_MAX=64 };
+typedef struct { u64 sw, rep; } IconPair;   /* rep 0: no usable replacement (missing, NULL or ambiguous) */
+/* One key's TMap<EPlatformType, UTexture2D*> inside its 0x70-byte InputIcons element el: data +0x18, count +0x20, free count +0x4c,
+   hash inline +0x50 / heap +0x58, hash size +0x60; 0x18-byte elements {platform byte, texture +8, hash next +0x10}. Looked up through
+   the hash exactly as the game does (bucket = platform & (size-1)). 1 found (*tex may be NULL), 0 no entry, -1 malformed. */
+static int icon_plat_find(u64 el, u8 plat, u64* tex){
+  u64 data=gr64(el+0x18), hash=gr64(el+0x58);
+  u32 num=gr32(el+0x20), nfree=gr32(el+0x4c), hs=gr32(el+0x60);
+  if(num>ICON_PLATS_MAX || nfree>num) return -1;
+  if(num==nfree) return 0;
+  if(!hs || hs>ICON_PLATS_MAX || (hs&(hs-1))) return -1;
+  if(!hash){ if(hs!=1) return -1; hash=el+0x50; }
+  if(!data || (data&7) || (hash&3) || !guest_span_readable(data,0x18ull*num,8) || !guest_span_readable(hash,4ull*hs,4)) return -1;
+  int32_t i=(int32_t)gr32(hash+4ull*(plat&(hs-1)));
+  for(u32 steps=0; i!=-1; steps++){
+    if(i<0 || (u32)i>=num || steps>=num) return -1;   /* out of the array, or a chain longer than the map (a cycle) */
+    u64 e=data+0x18ull*(u32)i;
+    if((u8)gr32(e)==plat){ *tex=gr64(e+8); return 1; }
+    i=(int32_t)gr32(e+0x10);
+  }
+  return 0;
+}
+/* InputIcons at asset+0x30 (TMap<FKey, entry>): data +0x30, count +0x38, allocation flags (inline words +0x40, heap +0x50, bit count
+   +0x58), free count +0x64; 0x70-byte elements. Lists {Switch texture -> layout texture} for every live key into t (*np pairs).
+   NULL when the list is usable, else why not (then nothing is translated). */
+static const char* icon_pairs(u64 asset, u8 want, IconPair* t, int* np){
+  *np=0;
+  if((asset&7) || !guest_span_readable(asset,0x80,8)) return "asset not readable";
+  u64 data=gr64(asset+0x30), heap=gr64(asset+0x50);
+  u32 num=gr32(asset+0x38), bits=gr32(asset+0x58), nfree=gr32(asset+0x64);
+  if(num>ICON_KEYS_MAX || nfree>num || bits!=num) return "key map counts";
+  if(num==nfree) return NULL;
+  u64 words= heap? heap : asset+0x40;
+  if(!heap && bits>128) return "key map flags";
+  if(!data || (data&7) || (words&3) || !guest_span_readable(data,0x70ull*num,8) || !guest_span_readable(words,(bits+31)/32*4ull,4))
+    return "key map not readable";
+  u32 live=0;
+  for(u32 i=0;i<bits;i++){
+    if(!(gr32(words+4*(i/32))>>(i%32)&1)) continue;
+    live++;
+    u64 el=data+0x70ull*i, sw=0, rep=0;
+    int f=icon_plat_find(el,3,&sw); if(f<0) return "platform map";
+    if(!f || !sw) continue;
+    int g=icon_plat_find(el,want,&rep); if(g<0) return "platform map";
+    if(!g) rep=0;
+    int k=0; while(k<*np && t[k].sw!=sw) k++;
+    if(k<*np){ if(t[k].rep!=rep) t[k].rep=0; continue; }   /* one Switch texture, keys that disagree: ambiguous, kept */
+    if(*np>=ICON_PAIRS) return "too many icons";
+    t[k].sw=sw; t[k].rep=rep; (*np)++;
+  }
+  return live==num-nfree? NULL : "key map live count";
+}
+static GuestFn icon_prompt_orig;
+static void icon_prompt(CPU* c, u64 entry){
+  u64 action=c->x[0], asset=c->x[1], pad=c->x[2], lr=c->x[30];
+  static unsigned traced; static int said;
+  int tracing= icon_trace() && __atomic_fetch_add(&traced,1,__ATOMIC_RELAXED)<32;
+  /* the original returns false at once, writing nothing, without an action or an asset */
+  if(!action || !asset || (pad&7) || !guest_span_readable(pad,8,8)){
+    if(tracing) LOG("Orbitals: icon prompt reached: caller main+%llx, action %llx, asset %llx, pad slot %llx: passed through\n",
+                    (unsigned long long)(lr-g_icon_base),(unsigned long long)action,(unsigned long long)asset,(unsigned long long)pad);
+    icon_prompt_orig(c,entry); return; }
+  IconPair t[ICON_PAIRS]; int np=0;
+  u64 before=gr64(pad);
+  const char* why=icon_pairs(asset,(u8)g_icon_want,t,&np);
+  icon_prompt_orig(c,entry);
+  /* after the call: only the caller's pad slot is read (and written) */
+  u64 after=gr64(pad), rep=0;
+  if(!why){
+    if(after==before || !after) why= after? "pad slot unchanged" : NULL;   /* no gamepad icon written (or a NULL one): nothing to do */
+    else{ int k=0; while(k<np && t[k].sw!=after) k++;
+      if(k==np) why="not a Switch icon of this asset"; else if(!t[k].rep) why="no single icon for this key"; else rep=t[k].rep; }
+  }
+  if(rep) memcpy(GP(pad),&rep,8);
+  if(tracing) LOG("Orbitals: icon prompt reached: caller main+%llx, action %llx, asset %llx: pad icon %llx -> %llx%s%s\n",
+                  (unsigned long long)(lr-g_icon_base),(unsigned long long)action,(unsigned long long)asset,(unsigned long long)after,
+                  (unsigned long long)(rep? rep : after),why?", kept: ":"",why?why:"");
+  if(why && after && !__atomic_exchange_n(&said,1,__ATOMIC_RELAXED))
+    LOG("Orbitals: button icons: a prompt keeps its Switch icon (%s)\n",why);
 }
 
 /* UEnhancedInputPlatformData::MappingContextRedirects, a TMap at obj+0x28: TSparseArray data +0x28, count +0x30, capacity +0x34,

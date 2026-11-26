@@ -11,8 +11,9 @@ int code_dynamic_call(u64 pc);                /* main.c: the code module calls p
 /* ===================================================================== button layout
    Measured on the PC (2026-11-26, docs/dev4k/BUTTON_LAYOUT.md):
    - Icons: DA_PlatformInputIcons maps each key to a texture per EPlatformType (Desktop 0, Playstation 1, Xbox 2, Switch 3) and the Switch 2
-     build always asks for the Switch one. button_layout=xbox / playstation wraps the game's one icon lookup (icon_lookup) so that a
-     Switch request gets that controller's texture: every prompt shows the Xbox / DualSense button for the same key. Buttons keep their
+     build always asks for the Switch one. button_layout=xbox / playstation wraps the game's icon lookup (icon_lookup) and the action
+     prompt that inlines its own Switch lookup (icon_prompt) so that a Switch icon becomes that controller's texture for the same key
+     (not shown on the PC yet, docs/dev4k/BUTTON_LAYOUT.md). Buttons keep their
      places unless button_accept_bottom is on, and the icons follow the key either way.
    - Accept on the bottom button (button_accept_bottom=1, experimental): the Switch 2 build redirects six Enhanced Input mapping contexts
      to Switch versions (BP_Switch2InputPlatformData, MappingContextRedirects) and its UI lists those Switch versions
@@ -68,13 +69,13 @@ enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
 int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx);
 int mem_span_ok_locked(u64 addr, u64 size, u32 perm);   /* inside mem_with_range only */
-#include "orbitals_buttons.h"   /* ei_clear, ei_virtual / ei_wrap_vtable, icon_lookup */
+#include "orbitals_buttons.h"   /* ei_clear, ei_virtual / ei_wrap_vtable, icon_lookup, icon_prompt */
 /* Button icons: DA_PlatformInputIcons (UMoreporkInputIconDataAsset) keeps InputIcons, a TMap<FKey, entry> (0x70-byte elements at
    +0x30) whose entry holds a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2, Switch 3; 0x18-byte elements: key
-   byte, texture at +8). Every lookup goes through one native function, main+0x40c5ce0 (asset, const FKey*, EPlatformType, UTexture2D**
-   out) -> bool, called only by the GetIconBrushForKey exec (Blueprint prompts, main+0x40b2e64) and the native icon widget
-   (main+0x4634a78, which asks for Switch 3 when it has an owning player and Xbox 2 when not). InputIcons is not visible to Blueprint
-   (CPF_Edit only) and no other code reads those maps (checked by the inlined lookup pattern in main.bin). button_layout=xbox /
+   byte, texture at +8). The per-key lookup is main+0x40c5ce0 (asset, const FKey*, EPlatformType, UTexture2D** out) -> bool, called
+   only by the GetIconBrushForKey exec (Blueprint prompts, main+0x40b2e64) and the native icon widget (main+0x4634a78, which asks for
+   Switch 3 when it has an owning player and Xbox 2 when not). It is NOT the only reader: the action prompt main+0x40c5020 inlines the
+   same lookup (icon_prompt_install below), and the PC runs showed the prompts never reaching 0x40c5ce0. button_layout=xbox /
    playstation wraps that function: a Switch request (and, for playstation, the Xbox fallback) looks up the layout's entry first and
    falls back to the original request when the key has none or a NULL texture (icon_lookup, orbitals_buttons.h). No guest memory is
    written. Both callers reach it with a direct bl, which the generated code turns into a direct C call unless codegen.py lists the
@@ -94,9 +95,37 @@ static void icon_install(const SwrModInfo* mod){
   GuestFn* e=&g_disp[(pc-g_code_lo)/4];
   if(!*e){ LOG("Orbitals: button icons: not applied (icon lookup has no entry)\n"); return; }
   if(!code_dynamic_call(pc)){ LOG("Orbitals: button icons: not applied (the game code calls the icon lookup directly: generate it again with this SwitchRecomp)\n"); return; }
-  g_icon_want= g_layout==1? 2 : 1;
   icon_lookup_orig=*e; *e=icon_lookup;
   LOG("Orbitals: button icons: %s icons (icon lookup main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_LOOKUP);
+}
+/* The action prompt (icon_prompt, orbitals_buttons.h): main+0x40c5020 looks the action's keys up in the same InputIcons map with
+   Switch 3 inlined (it never calls the icon lookup above), and it is what the title, menus, lobby, settings and co-op prompts reach
+   (callers main+0x40c4ed0 and main+0x40d3990, both a direct bl, the only references in main.bin). Installed on its own, with its own
+   checks: the entry, the arguments it keeps (x2 into x20, then [sp+8]), both strides, the outer map fields, the inner map fields and
+   hash mask, the platform compare (cmp w8, #3), the texture load and its store to the pad slot, and the two callers' bl words. */
+enum { ICON_PROMPT=0x40c5020, ICON_PROMPT_CALL_A=0x40c4ed0, ICON_PROMPT_CALL_B=0x40d3990 };
+static void icon_prompt_install(const SwrModInfo* mod){
+  static const struct { u32 off, w; } sig[]={
+    {0x40c5020,0xd503237f}, {0x40c5024,0xd10243ff},                          /* pacibsp; sub sp, sp, #0x90 */
+    {0x40c5060,0xaa0203f4}, {0x40c5088,0xf90007f4},                          /* mov x20, x2; str x20, [sp, #8] */
+    {0x40c5084,0x52800e1a}, {0x40c50e4,0xb9403b08}, {0x40c50e8,0xb9406709},  /* mov w26, #0x70; ldr w8, [x24, #0x38]; ldr w9, [x24, #0x64] */
+    {0x40c5120,0xf9401b09}, {0x40c5134,0xb9406908},                          /* ldr x9, [x24, #0x30]; ldr w8, [x8, #0x68] */
+    {0x40c51c4,0xb9402109}, {0x40c51c8,0xb9404d0a}, {0x40c51d4,0xf9402d0a},  /* inner count +0x20, free +0x4c, hash heap +0x58 */
+    {0x40c51d8,0x91014109}, {0x40c51e4,0xb940610a}, {0x40c51ec,0x1200054a},  /* hash inline +0x50, hash size +0x60, and w10, w10, #3 */
+    {0x40c51fc,0xf9400d09}, {0x40c5200,0x52800308}, {0x40c5208,0x39400148},  /* inner data +0x18; mov w8, #0x18; ldrb w8, [x10] */
+    {0x40c520c,0x71000d1f}, {0x40c5214,0xb940114a},                          /* cmp w8, #3; ldr w10, [x10, #0x10] */
+    {0x40c5290,0xf9400548}, {0x40c5294,0xf94007e9}, {0x40c5298,0xf9000128},  /* ldr x8, [x10, #8]; ldr x9, [sp, #8]; str x8, [x9] */
+    {ICON_PROMPT_CALL_A,0x94000054}, {ICON_PROMPT_CALL_B,0x97ffc5a4} };
+  for(unsigned i=0;i<sizeof sig/sizeof sig[0];i++){
+    u64 a=mod->base+sig[i].off;
+    if(a<g_code_lo || a>=g_code_hi || gr32(a)!=sig[i].w){ LOG("Orbitals: button prompts: not applied (action prompt not found, %x)\n",sig[i].off); return; }
+  }
+  u64 pc=mod->base+ICON_PROMPT;
+  GuestFn* e=&g_disp[(pc-g_code_lo)/4];
+  if(!*e){ LOG("Orbitals: button prompts: not applied (action prompt has no entry)\n"); return; }
+  if(!code_dynamic_call(pc)){ LOG("Orbitals: button prompts: not applied (the game code calls the action prompt directly: generate it again with this SwitchRecomp)\n"); return; }
+  icon_prompt_orig=*e; *e=icon_prompt;
+  LOG("Orbitals: button prompts: %s icons (action prompt main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_PROMPT);
 }
 /* The platform's accept / back keys. Unreal builds EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey() and Virtual_Back =
    GetGamepadBackKey() as copies of two face button FKeys at the end of the EKeys static initializer (main+0x50dc00, called once from
@@ -137,7 +166,9 @@ static void ekeys_install(const SwrModInfo* mod){
 }
 static void ei_install(const SwrModInfo* mod){
   if(!g_layout) return;
+  g_icon_want= g_layout==1? 2 : 1; g_icon_base=mod->base;
   icon_install(mod);
+  icon_prompt_install(mod);
   if(!g_accept_bottom) return;
   ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;

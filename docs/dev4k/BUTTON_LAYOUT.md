@@ -7,6 +7,29 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 The 08:30-08:44 PC runs with PlayStation selected still show Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
 The regenerated module exports the dynamic lookup and both generated caller chunks use `CALLDYN`, but the opt-in
 `SWR_ICON_TRACE=1` logs no calls to the wrapper. The installation log alone is not proof that a prompt reaches it.
+- Root cause (from `main.bin`, 2026-11-26): those prompts never call the icon lookup main+0x40c5ce0. They go through the action
+  prompt main+0x40c5020 `(UInputAction*, asset, UTexture2D** pad, UTexture2D** keyboard, bool* label, FKey* labelKey, player) -> bool`,
+  which gets the action's mapped keys (0x40cb140) and looks each one up in `InputIcons` itself, inlined, with the platform hard-coded:
+  a gamepad key asks Switch 3 (`and w10, w10, #3` at 0x40c51ec, `cmp w8, #3` at 0x40c520c) and writes `*pad`; a keyboard key asks
+  Desktop 0 and writes `*keyboard`, or, without one, the asset's default texture (+0x80), `*label = true` and a copy of that keyboard
+  key into `*labelKey` (so x5 is never the gamepad key). Its only references are two direct `bl` (0x40c4ed0 in the input-action
+  widget, 0x40d3990), both zeroing `*pad` first.
+- Fix (built offline, not yet run on the PC): `codegen.py` `DYNAMIC_CALLS` now lists 0x40c5020 too, and the runtime wraps it
+  (`icon_prompt`, runtime/orbitals_buttons.h; install with its own fail-closed word checks, `icon_prompt_install`). Before the call,
+  while the caller holds the asset (exactly the original's own lifetime for it), it lists for every live `InputIcons` key (allocation
+  bits) its Switch texture and that key's PlayStation / Xbox texture, through each key's platform-map hash as the game does. After the
+  call it reads only `*pad`: if the call changed it to a Switch texture of that list, it writes the same key's layout texture. Kept
+  Switch (fail closed): a Switch texture shared by keys whose replacements differ, a missing or NULL replacement, an unchanged slot, or
+  a map that fails any bound (counts, free count, live count vs flags, inline flags past 128 bits, alignment / readability, hash size,
+  index range, chain longer than the map). Registers, return value, `*keyboard`, `*label`, `*labelKey` and its reference count are the
+  original's. Logs: "button prompts: PlayStation icons (action prompt main+40c5020 wrapped)" at start; once, "a prompt keeps its Switch
+  icon (reason)". `SWR_ICON_TRACE=1` logs the first 32 prompt calls (caller main+offset, asset, old -> new texture, reason kept) and
+  the first 16 icon lookup calls. **The code module must be generated again** (both callers' chunks change); an older module logs
+  "button prompts: not applied (... generate it again ...)". Cost: one walk of the asset's keys (two small hash lookups each) per
+  prompt call, only with xbox / playstation; not measured. Tests: `python3 -m unittest tests.test_button_layout` (both generated callers
+  through CALLDYN, PlayStation / Xbox, missing / NULL / ambiguous / malformed maps, no asset read after the call, registers and every
+  other guest byte equal to the unwrapped run, trace opt-in and bounded; the install words are checked against `main.bin` when it is
+  present, `ORBITALS_MAIN_BIN`).
 - The game ships every icon: `DA_PlatformInputIcons` maps each FKey to a texture per `EPlatformType`
   (Desktop 0, Playstation 1, Xbox 2, Switch 3). The Switch 2 build always draws the Switch entry (which reuses the Xbox
   letter textures, swapped to the Nintendo positions).
@@ -27,7 +50,8 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   table (`CALLDYN`) and the module exports `swr_dynamic_calls`. **The game code (`Orbitals_code.dll`) must be generated again with this
   SwitchRecomp** (`switchrecomp.py` on the game folder, as at install); only the two C chunks holding the callers change, so a kept
   build folder recompiles just those. A runtime with an older code module logs "button icons: not applied (the game code calls the icon
-  lookup directly ...)" and keeps Nintendo icons. Test: `python3 -m unittest tests.test_button_layout` (generated caller, wrapper,
+  lookup directly ...)" and keeps Nintendo icons. This lookup is kept for the paths that do use it, but the PC runs show the menu and
+  co-op prompts do not (they take the action prompt above). Test: `python3 -m unittest tests.test_button_layout` (generated caller, wrapper,
   NULL / missing fallback, and the old direct call shown to bypass it).
 - Log: "Orbitals: button icons: PlayStation icons (icon lookup main+40c5ce0 wrapped)"; once, if any key lacks the layout's icon,
   "a key without a PlayStation icon keeps the platform 3 one".
@@ -54,7 +78,9 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   Six redirects are rewritten before use. Glyphs and full gameplay coverage remain pending; the option is off by default.
 
 ## Next steps (not done)
-- Find the prompt path actually used on the PC, then validate both players and layouts and measure the broad wrappers' cost.
+- Regenerate the code module, then on the PC: `SWR_ICON_TRACE=1` must show "icon prompt reached: caller main+40c4ed4 / 40d3994"
+  with Switch -> PlayStation textures; screenshots of title / main / lobby / settings / co-op with PlayStation and Xbox; A/B bench
+  Nintendo vs PlayStation for the per-prompt walk; validate both players.
 
 ## Review notes (Codex, 2026-11-26)
 - (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
