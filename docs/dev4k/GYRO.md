@@ -38,6 +38,12 @@ at96.69s: yaw −134.460° and pitch45.000°, both0.00% error. The co-op screens
 view while the first player's view remains directed toward the wreck. At126.92s P1 closes for shared pause; P2 has no UpdateRotation
 for15050ms. At141.97s gameplay resumes, and the resumed screenshot shows no accumulated-turn jump. Evidence: the run's Orbitals.log
 under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,resumed}_s.png` under `/tmp/claude-1000/orb/`.
+
+**PC validation,10:42 run `gyro-native-player1-delayed`:** the runtime arms at0.19s with delay110. Player1's test starts
+at110.20s on ControllerId0 and finishes at112.53s: yaw−134.460°, pitch45.000°, applied and measured camera rotation agree
+with both integrals to0.00%. The105s/115s screenshots (`-camera-before_s.png`/`-camera-after_s.png`) visibly show only
+player1's view turning; player2 keeps looking toward the wreck. This supplies the missing player1 gameplay proof without
+relaxing the continuity or terminal-abort rules. Build log `/tmp/orbitals-after-flight-1026.log`: NVN/runtime exit0.
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
@@ -153,10 +159,10 @@ under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,r
 ## Not verified
 - Player-one run `gyro-native-player1` did not produce a valid synthetic result: with Always mode selecting slot0, it started
   at77.05s during the initial gameplay/loading transition and ended INCONCLUSIVE at77.52s after a205ms UpdateRotation gap.
-  The ship gate opened at91.96s. No P1 PASS or camera-motion proof is claimed from its later screenshots. A delayed test arm is
-  being prepared so the check can start after loading while retaining the continuous-gameplay and terminal-abort rules.
-- Still to observe on the PC: on-foot gameplay, an additional cinematic beyond the intro, physical-pad directional feel and
-  separate synthetic camera proof for player1. Title/menu rejection, both ship gates, player2 synthetic motion and pause/resume
+  The ship gate opened at91.96s. No P1 PASS or camera-motion proof is claimed from that run's later screenshots. The separate
+  delayed run above supplies that proof; the initial aborted result remains INCONCLUSIVE.
+- Still to observe on the PC: on-foot gameplay, an additional cinematic beyond the intro and physical-pad directional feel.
+  Title/menu rejection, both ship gates, separate synthetic motion for both players and pause/resume
   have been observed as recorded above. The test was armed at startup but waited for continuous gameplay; no initialization PASS
   is counted as acceptance.
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
