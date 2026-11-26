@@ -359,10 +359,12 @@ class LauncherWindowTest(LauncherWindow):
                 app.flush()
                 self.assertEqual(core.Profiles(app.profiles.root).settings["button_layout"], expected)
             app.process = object()
-            app.view.rows.sync()
-            choice.press()
-            self.assertEqual(app.settings()["button_layout"], "PlayStation")
-            app.process = None
+            try:
+                app.view.rows.sync()
+                choice.press()
+                self.assertEqual(app.settings()["button_layout"], "PlayStation")
+            finally:
+                app.process = None
 
     def test_settings_are_kept_as_they_change(self):
         app = self.window()
