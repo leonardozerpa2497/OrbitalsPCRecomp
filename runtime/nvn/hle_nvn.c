@@ -46,7 +46,6 @@ void nvn_pool_gpu_written(const void *pool) { pool_t *p = (pool_t *)pool; if (p 
 #endif
 
 // As nxnative's macro: each implementation is checked at compile time against its nvn_protos.h type. gen_hle.py reads the same lines for the registry and the adapters
-void swr_nvn_backtrace(const char *tag);   // nvn_hook.c (experiment display-4k)
 #define NVN(name, ret, ...) static ret h_##name(__VA_ARGS__); static const NVNT_##name chk_##name __attribute__((unused)) = h_##name; static ret h_##name(__VA_ARGS__)
 // Newer interfaces without prototypes: no signature check
 #define NVN_NOPROTO(name, ret, ...) static ret h_##name(__VA_ARGS__)
@@ -456,11 +455,6 @@ int nvn_flushed(const void *p, uint64_t n) {   // whether the CPU flushed any of
 }
 NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b) {
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
-    { static int traced; int w = (int)s->d.width, h = (int)s->d.height;   // experiment display-4k: who makes the screen-sized textures
-      static uint32_t seen[64]; static int nseen;   // each large size once
-      if (w >= 1000 && h >= 500 && nseen < 64) { uint32_t k = (uint32_t)w << 16 | (uint32_t)h; int i = 0; while (i < nseen && seen[i] != k) i++;
-        if (i == nseen) { seen[nseen++] = k; LOG("[trace] new texture size %dx%d", w, h); } }
-      (void)traced; }
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); gfx_tex_release(o); }
