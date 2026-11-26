@@ -41,7 +41,8 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
   - Type first: the controller is an `OrbBasePlayerController` (class singleton main+0x9cb95d0). The check is the engine's own IsA
     (main+0x451d700): the object's class (+0x10) has a base chain array (+0x30) and a signed depth (+0x38); the entry at the wanted
     class's depth must be the wanted class's chain struct, wanted class + 0x30 (not the class pointer). The wanted class's own chain
-    must name itself at its depth, depths must be 0..256 and the wanted depth not above the actual one; every pointer is checked
+    must name itself at its depth, and so must the object's class at its own depth before it counts as a well-formed other class
+    (the chain is never read past the object's own depth); depths must be 0..256 and the wanted depth not above the actual one; every pointer is checked
     (set, 8-aligned, below 2^48, readable), and every object's base is checked before a field offset is added to it, so a null or
     wrapping pointer never reaches readable memory through its offset. Singletons are only read, never initialized (no StaticClass call): an empty one closes
     the gate. The title's `OrbFrontEndPlayerController` is only 0x750 bytes, so none of the game fields below is read until this holds.
@@ -100,7 +101,8 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
   stale singleton, a malformed game state class); the world chain (no, unreadable or misaligned Outer, an Outer cycle, 40 Outers,
   an unreadable one mid-chain, an Outer whose class is unreadable, tagged or malformed (with a world field, so neither walking
   past it nor taking it as the level opens), a null or wrapping world, game state, Outer or controlled actor pointer whose field
-  offset lands on readable memory, no level, no world, no or unreadable game state, an engine or other game state class, an unreadable
+  offset lands on readable memory, an Outer class over the depth cap or negative (its own entry naming it), a shallow (UObject)
+  Outer whose own chain entry is unreadable, out of memory or names another class, no level, no world, no or unreadable game state, an engine or other game state class, an unreadable
   pause byte). Both ship roles and on foot open for both players; a shared pause closes both players and both reopen without a
   jump while P1's pause menu pointer stays cached; a shared pause during the synthetic test ends it INCONCLUSIVE; both players turn
   their own camera at once; no jump after a
@@ -118,8 +120,8 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
   open, closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE, no relock check, no window reset on a
   gap or a new controller, no abort on a gap, no drop of the ended test's turn, no running check at publication, no clear at an
   INCONCLUSIVE end) each fail at least one test.
-  The runner also builds 21 mutations of the new gate (an invalid Outer walked past, a field base not checked, no controller type check, the type check after the game fields, the chain
-  entry compared with the class, no wanted/actual depth comparison, no negative depth or cap check, no self check of the
+  The runner also builds 22 mutations of the new gate (no own-depth self check of the object's class, an invalid Outer walked past, a field base not checked, no controller type check, the type check after the game fields, the chain
+  entry compared with the class, no wanted/actual depth comparison, no negative depth check together with the 2^32 field offset bound (each alone is covered by the other), no cap check, no self check of the
   singleton, view target or pending compared with the pawn, no MainCharacter fallback, no controllable type, owner, main
   character, cinematic or pause check, an unknown game state accepted, no game state type check, no Outer bound, the first Outer
   taken as the level) and requires each to fail. Removing the cycle check alone is not observable (the 32 bound still closes), nor

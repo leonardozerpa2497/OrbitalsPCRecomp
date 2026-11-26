@@ -216,8 +216,8 @@ static void paused_open(void){ *GP(GSTATE + GS_PAUSED) = 0; }
 /* malformed class metadata: every one closes; the open side rebuilds the classes */
 static void classes_open(void){ make_classes(); make_pc(0, 0); }
 static void negative_depth_close(void){ gw32(cls(K_BP_PC) + 0x38, (u32)-1); }
-static void huge_depth_close(void){   /* 1000 > the 256 cap, while the entry at the wanted depth still matches */
-  gw32(cls(K_BP_PC) + 0x38, 1000);
+static void huge_depth_close(void){   /* 1000 > the 256 cap, while the entry at the wanted depth and its own entry still match */
+  gw32(cls(K_BP_PC) + 0x38, 1000); gw64(chain_of(K_BP_PC) + 1000 * 8, cls(K_BP_PC) + 0x30);
 }
 static void huge_negative_depth_close(void){ gw32(cls(K_BP_PC) + 0x38, 0x80000000u); }
 static void wanted_negative_depth_close(void){   /* entry -1 of both chains made to match: only the sign check closes it */
@@ -281,6 +281,21 @@ static void ship_wraps_close(void){   /* ControlledActor 0 - 0x10: its class fie
   gw64(a + CA_CONTROLLER, pcs[0]);
 }
 static void ship_wraps_open(void){ memset(GP(0), 0, 0x1000); make_pc(0, 0); }
+/* review of dd2c548: an Outer of a class shallower than ULevel (UObject, depth 0) is a well-formed other class only once its own
+   chain names it at its own depth; with that entry unreadable, out of memory or naming another class it closes */
+/* an Outer of a class over the depth cap whose own entry names it: walking past it as "not a level" would open */
+static void outer_over_cap_close(void){
+  outer_short_open(); gw64(OUTERS + 0x100 + LEVEL_WORLD, WORLD);
+  gw32(cls(K_PACKAGE) + 0x38, 1000); gw64(chain_of(K_PACKAGE) + 1000 * 8, cls(K_PACKAGE) + 0x30);
+}
+static void outer_negative_close(void){   /* depth -1, its entry -1 naming it */
+  outer_short_open(); gw64(OUTERS + 0x100 + LEVEL_WORLD, WORLD);
+  gw32(cls(K_PACKAGE) + 0x38, (u32)-1); gw64(chain_of(K_PACKAGE) - 8, cls(K_PACKAGE) + 0x30);
+}
+static void outer_shallow_open(void){ bad_lo = bad_hi = 0; make_classes(); outer_short_open(); object(OUTERS, K_OBJECT, OUTERS + 0x100); }
+static void outer_shallow_unreadable_close(void){ outer_shallow_open(); bad_lo = chain_of(K_OBJECT); bad_hi = bad_lo + 8; }
+static void outer_shallow_out_of_memory_close(void){ outer_shallow_open(); gw64(cls(K_OBJECT) + CLASS_BASE_CHAIN, MEM + 0x100); }
+static void outer_shallow_not_itself_close(void){ outer_shallow_open(); gw64(chain_of(K_OBJECT), cls(K_PACKAGE) + 0x30); }
 static void no_level_close(void){ object(LEVEL, K_PACKAGE, WORLD); }
 static void world_null_close(void){ gw64(LEVEL + LEVEL_WORLD, 0); }
 static void world_unreadable_close(void){ bad_lo = WORLD + WORLD_GAME_STATE; bad_hi = bad_lo + 8; }
@@ -598,6 +613,11 @@ int main(void){
   closed_then_open_without_jump("game state pointer wrapping to readable memory", gs_wraps_close, low_memory_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("Outer pointer wrapping", level_wraps_close, low_memory_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("controlled actor pointer wrapping", ship_wraps_close, ship_wraps_open, GATE_CONTROLLED_ACTOR);
+  closed_then_open_without_jump("Outer class depth over the cap", outer_over_cap_close, outer_class_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("Outer class depth negative", outer_negative_close, outer_class_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("shallow Outer chain unreadable", outer_shallow_unreadable_close, outer_shallow_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("shallow Outer chain out of memory", outer_shallow_out_of_memory_close, outer_shallow_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("shallow Outer chain names another class", outer_shallow_not_itself_close, outer_shallow_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("no level in the Outer chain", no_level_close, world_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("level without a world", world_null_close, world_open, GATE_NO_GAME_STATE);
   closed_then_open_without_jump("world game state unreadable", world_unreadable_close, unreadable_open, GATE_NO_GAME_STATE);

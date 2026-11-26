@@ -17,10 +17,12 @@ MUTATIONS = {
     "controller class checked after the game fields": [(CLASS_CHECK, ""), (EXTENDED_READ, EXTENDED_READ + CLASS_CHECK)],
     "chain entry compared with the class": [("  return entry==want+CLASS_BASE_CHAIN;", "  return entry==want;")],
     "no wanted depth above actual depth check": [("  if(wd>d) return 0;", "")],
-    "no negative depth check": [("*depth>=0 && ", "")],
+    # a negative depth also makes every chain offset >= 2^32, which gyro_field64 refuses: removing the sign check alone is equivalent
+    "no negative depth check nor offset bound": [("*depth>=0 && ", ""), (" || off>=(1ull<<32)", "")],
     "no depth cap": [(" && *depth<=GYRO_MAX_DEPTH", "")],
     "no wanted class self check": [("  if(!gyro_field64(wchain,(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return -1;\n", "")],
     "invalid Outer walked past as not a level": [("    if(is<0) return -1;", "")],
+    "no own-depth self check of the object's class": [("  if(!gyro_field64(chain,(u64)d*8,&entry) || entry!=cls+CLASS_BASE_CHAIN) return -1;\n", "")],
     "field base not checked": [("  if(!gyro_ptr(base) || off>=(1ull<<32) ||", "  if(off>=(1ull<<32) ||")],
     "view target compared with the pawn": [("  if(q->vt!=actor) return GATE_VIEW_TARGET;", "  if(q->vt!=q->pawn) return GATE_VIEW_TARGET;")],
     "no MainCharacter fallback": [("u64 actor= q->controlled? q->controlled : q->main;", "u64 actor= q->controlled;")],

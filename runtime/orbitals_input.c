@@ -549,6 +549,8 @@ static int gyro_isa3(u64 obj, int which){
   if(!g_cls_slot[which] || !gyro_field64(g_cls_slot[which],0,&want) || !gyro_class_depth(want,&wchain,&wd)) return -1;
   if(!gyro_field64(wchain,(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return -1;
   if(!gyro_field64(obj,OBJ_CLASS,&cls) || !gyro_class_depth(cls,&chain,&d)) return -1;
+  /* the object's class must name itself at its own depth (read only up to that depth) before it counts as a well-formed class */
+  if(!gyro_field64(chain,(u64)d*8,&entry) || entry!=cls+CLASS_BASE_CHAIN) return -1;
   if(wd>d) return 0;   /* shallower than the wanted class: another class (its chain is not read past its own depth) */
   if(!gyro_field64(chain,(u64)wd*8,&entry)) return -1;
   return entry==want+CLASS_BASE_CHAIN;
