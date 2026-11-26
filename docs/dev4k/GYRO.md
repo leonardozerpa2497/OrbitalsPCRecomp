@@ -140,6 +140,10 @@ under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,r
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
 
 ## Not verified
+- Player-one run `gyro-native-player1` did not produce a valid synthetic result: with Always mode selecting slot0, it started
+  at77.05s during the initial gameplay/loading transition and ended INCONCLUSIVE at77.52s after a205ms UpdateRotation gap.
+  The ship gate opened at91.96s. No P1 PASS or camera-motion proof is claimed from its later screenshots. A delayed test arm is
+  being prepared so the check can start after loading while retaining the continuous-gameplay and terminal-abort rules.
 - Still to observe on the PC: on-foot gameplay, an additional cinematic beyond the intro, physical-pad directional feel and
   separate synthetic camera proof for player1. Title/menu rejection, both ship gates, player2 synthetic motion and pause/resume
   have been observed as recorded above. The test was armed at startup but waited for continuous gameplay; no initialization PASS
