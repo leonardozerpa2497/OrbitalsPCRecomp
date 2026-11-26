@@ -221,3 +221,11 @@ This functional run is not a performance comparison: jumping, exiting seats and 
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
   if it is the other way.
 - Steam Input / DS5Bridge can take the pad's sensors before SDL; the log line `gyro: P1 ... has a gyro` confirms SDL sees them.
+
+### Interactive sensitivity and touchpad check
+
+The owner reports smooth motion from the regular DualSense over Bluetooth and from the Edge over direct USB; Edge Bluetooth remains jerky. This is observed feel, not acceptance of the uninstalled frontend polling candidate.
+
+The active Player profile now explicitly stores sensitivity 1.0 on both axes (previously the 1.5 defaults). The launcher was closed normally, updated through `Profiles.update_active`, and reopened. A full JSON comparison confirmed that only those two settings changed. Backup: `%LOCALAPPDATA%/OrbitalsLauncher/launcher-before-gyro-speed-20261126-141812.json`; restore those two previous settings to revert. The pause action remains the default Hold to pause.
+
+The owner reported that holding the touchpad did not pause motion. A direct SDL probe subsequently recorded three Edge touchpad presses as button 20, including sustained presses; both controllers' SDL mappings expose `touchpad:b11` (raw joystick button, mapped to gamepad button 20). An isolated harness using the real `orbitals_gyro_pad` and simulated engine checked hold suppression, release/resume and toggle with zero failures. Its first attempt lacked the fake AddInput callbacks and crashed; after correcting that harness setup it passed. This does not reproduce or resolve the reported in-game failure. A direct-USB in-game hold test has been requested and remains pending. DS5Bridge remains temporarily stopped for that comparison; restoration is still outstanding.
