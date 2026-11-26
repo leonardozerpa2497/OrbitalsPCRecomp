@@ -3,11 +3,16 @@
 Ini keys (Orbitals.ini, launcher Controls page): `button_layout=nintendo|xbox|playstation`, `button_accept_bottom=0|1`.
 Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming PC on 2026-11-26.
 
-## Icons (PlayStation observed on the PC; Xbox and performance gates pending)
+## Icons (PlayStation and Xbox observed; performance comparison pending)
 The regenerated module and reviewed runtime were installed at 09:24. Run `controls-native-gate-ps` shows Cross for Select in the
 main menu, R2 for both players' co-op prompts, Square for the second player's action and Circle for Back in pause. The bounded
 trace records actual replacement textures from caller main+40c4ed4. Screenshots are in `/tmp/claude-1000/orb/controls-native-gate-ps-*_s.png`.
-Settings and Xbox still need their own captures, and the final Nintendo/PlayStation performance comparison remains pending.
+PlayStation Settings shows Cross/Circle in `ps-settings-back_s.png`; `ps-main-after-back_s.png` shows the return to the main menu.
+Run `controls-native-gate-xbox` shows RT for both co-op players and X for player two's action. Player two opens pause,
+returns with the right face button (B), then opens pause again and selects Resume with the bottom face button (A).
+The corresponding `-coop`, `-paused`, `-back-result` and `-resumed` screenshots were inspected.
+`xbox-settings-clean_s.png` is actually the main menu with A Select: the timed navigation ran during a transition.
+It is not Settings evidence. Xbox Settings and the final Nintendo/PlayStation performance comparison remain pending.
 
 Before this fix, the 08:30-08:44 PC runs with PlayStation selected showed Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
 The regenerated module exports the dynamic lookup and both generated caller chunks use `CALLDYN`, but the opt-in
@@ -64,8 +69,9 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   "a key without a PlayStation icon keeps the platform 3 one".
 - Before (removed): a low-priority thread scanned all guest memory once a second for those 4-entry maps and rewrote their Switch
   texture. It cost 10.7% frames over 17.7 ms at 1800p co-op (see Performance below).
-- With `button_accept_bottom=1`, the latest PC run accepts title/main/lobby with the bottom button and returns from the lobby
-  with the right button. The glyphs remain Nintendo. Both-player gameplay and Xbox validation are still pending.
+- With `button_accept_bottom=1`, the PC runs accept title/main/lobby and PlayStation Settings with the bottom button,
+  return with the right button, and use the selected layout's glyphs. Xbox player two's pause/resume flow also passes.
+  On-foot jump and every gameplay interaction have not been exercised.
 
 ## Accept on the bottom button (experimental, partial)
 - The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (`BP_Switch2InputPlatformData`
@@ -82,12 +88,13 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   memory scan that also did it is removed) and the user
   Game.ini gives the UI the PC contexts. The EKeys initializer hook below also swaps CommonUI's accept/back keys.
   The latest PC run confirms bottom acceptance on title, main menu and lobby, and right-button back from lobby.
-  Six redirects are rewritten before use. Glyphs and full gameplay coverage remain pending; the option is off by default.
+  Six redirects are rewritten before use. Selected glyphs now work; full gameplay coverage remains pending.
+  The runtime option is off by default. The reviewed, not-yet-installed launcher ties bottom acceptance to Xbox/PlayStation.
 
 ## Next steps (not done)
-- Regenerate the code module, then on the PC: `SWR_ICON_TRACE=1` must show "icon prompt reached: caller main+40c4ed4 / 40d3994"
-  with Switch -> PlayStation textures; screenshots of title / main / lobby / settings / co-op with PlayStation and Xbox; A/B bench
-  Nintendo vs PlayStation for the per-prompt walk; validate both players.
+- Finish Xbox Settings capture and the alternating Nintendo/PlayStation benchmark at both target resolutions.
+  The module has been regenerated, the action-prompt trace and real replacement glyphs observed.
+  Validate on-foot jump and remaining gameplay interactions without advancing the fixed benchmark save.
 
 ## Review notes (Codex, 2026-11-26)
 - (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
