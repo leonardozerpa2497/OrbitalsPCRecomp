@@ -3,7 +3,9 @@
 // queue in commit order. The ordering rule of the NVN layer (nvn_mtl.h, gfx_backend.h): every visible effect of GPU completion happens only after
 // the GPU has actually completed the submission.
 #include "vk_submit.h"
+#include "vk_wb_core.h"
 #include <process.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,7 +19,7 @@ typedef struct {
     int deferred; _Atomic int recorded;   // vk_defer.c records its commands; recorded: the recorder has ended its buffers (only then may it go to the queue)
     uint64_t value, t_commit, t_submit;   // t_submit: handed to the queue (SWR_TRACE)
     uint64_t take_seq;   // when it was taken for recording (vks_take_seq): vk_retire waits for every slot taken before it to be committed
-    post_t *posts; size_t nposts, cap;
+    postq_t posts;   // of post_t; room reserved before a dispatch for its landings (vks_post_reserve)
 } slot_t;
 
 static slot_t g_slot[NSLOT];
@@ -49,7 +51,7 @@ static int slot_take(void) {
     for (;;) {
         for (int i = 0; i < NSLOT; i++) if (g_slot[i].state == S_FREE) {
             slot_t *s = &g_slot[i];
-            s->state = S_RECORDING; s->up_used = 0; s->value = 0; s->t_submit = 0; s->nposts = 0; s->take_seq = atomic_fetch_add(&g_take_seq, 1) + 1; s->deferred = 0; atomic_store(&s->recorded, 0);
+            s->state = S_RECORDING; s->up_used = 0; s->value = 0; s->t_submit = 0; s->take_seq = atomic_fetch_add(&g_take_seq, 1) + 1; postq_reset(&s->posts); s->posts.esz = sizeof(post_t); s->deferred = 0; atomic_store(&s->recorded, 0);
             { static int rel = -1; if (rel < 0) { const char *e = getenv("NXRT_VK_CB_RELEASE"); rel = !e || *e != '0'; } vkResetCommandPool(g_vk.dev, s->pool, rel ? VK_COMMAND_POOL_RESET_RELEASE_RESOURCES_BIT : 0); }   // kept, 32 pools held a frame's worth each in device memory: over 1 GB past our own count. NXRT_VK_CB_RELEASE=0 keeps them
             VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
             vkBeginCommandBuffer(s->up, &bi); vkBeginCommandBuffer(s->main, &bi);
@@ -129,7 +131,7 @@ static unsigned __stdcall completion_main(void *arg) {
             slot_t *s = &g_slot[idx];
             if (s->t_submit) swr_trace_span("submission from queue submit to completion seen", s->t_submit);
             { VTR0();
-              for (size_t i = 0; i < s->nposts; i++) post_run(&s->posts[i]);
+              for (size_t i = 0; i < s->posts.n; i++) post_run(&((post_t *)s->posts.v)[i]);
               VTR1("completion effects (write-backs, events)"); }
             AcquireSRWLockExclusive(&g_lk);
             atomic_store(&g_vk.tl_done, s->value);
@@ -154,7 +156,7 @@ void vks_shutdown(void) {
     if (!g_thread) return;
     vks_finish();
     atomic_store(&g_stop, 1); WaitForSingleObject(g_thread, 5000); CloseHandle(g_thread); g_thread = NULL;
-    for (int i = 0; i < NSLOT; i++) { if (g_slot[i].pool) vkDestroyCommandPool(g_vk.dev, g_slot[i].pool, NULL); free(g_slot[i].posts); memset(&g_slot[i], 0, sizeof g_slot[i]); }
+    for (int i = 0; i < NSLOT; i++) { if (g_slot[i].pool) vkDestroyCommandPool(g_vk.dev, g_slot[i].pool, NULL); free(g_slot[i].posts.v); memset(&g_slot[i], 0, sizeof g_slot[i]); }
     g_norder = 0; g_cur = -1;
 }
 
@@ -188,15 +190,27 @@ uint64_t vks_oldest_recording(uint64_t *assigned) {
     return m;
 }
 
-static void post_add(post_t p) {
-    if (g_cur < 0) { VKRED("completion effect posted outside a submission (kind %d): applied now", p.kind); post_run(&p); return; }
-    slot_t *s = &g_slot[g_cur];
-    if (s->nposts == s->cap) { s->cap = s->cap ? s->cap * 2 : 16; s->posts = realloc(s->posts, s->cap * sizeof *s->posts); }
-    s->posts[s->nposts++] = p; atomic_fetch_add(&g_posted, 1);
+// No memory for a completion effect: the submission being recorded must not complete without it (a guest event, counter or write-back silently
+// lost while its fence value reads done). Nothing of it was committed yet, so ending the run here publishes no completion. VKLOG: VKRED may be spent
+static void post_fatal(const postq_t *q) {
+    VKLOG("[RED] no memory for a completion effect (%llu queued, room for %llu): ending the run rather than completing the submission without it", (unsigned long long)q->n, (unsigned long long)q->cap);
+    fflush(NULL); abort();
 }
+// reserved: the token of room set aside by vks_post_reserve (0: none; a token of another slot is not this slot's room: it posts as an ordinary
+// effect). Always 1: with no memory the run ends (post_fatal)
+static int post_add_(post_t p, uint64_t reserved) {
+    if (g_cur < 0) { VKRED("completion effect posted outside a submission (kind %d): applied now", p.kind); post_run(&p); return 1; }
+    slot_t *s = &g_slot[g_cur];
+    post_t *d = postq_push_must(&s->posts, reserved && reserved == s->take_seq, post_fatal);
+    *d = p; atomic_fetch_add(&g_posted, 1); return 1;
+}
+static void post_add(post_t p) { post_add_(p, 0); }
 void vks_post_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post_add((post_t){1, val, mode, v, 0, 0, NULL, NULL}); }
 void vks_post_counter(uint64_t addr, uint32_t type) { post_add((post_t){2, NULL, 0, 0, addr, type, NULL, NULL}); }
 void vks_post_fn(void (*fn)(void *), void *arg) { post_add((post_t){3, NULL, 0, 0, 0, 0, fn, arg}); }
+uint64_t vks_post_reserve(void) { return g_cur >= 0 && postq_reserve(&g_slot[g_cur].posts) ? g_slot[g_cur].take_seq : 0; }
+void vks_post_unreserve(uint64_t token) { if (token && g_cur >= 0 && g_slot[g_cur].take_seq == token) postq_unreserve(&g_slot[g_cur].posts); }
+int vks_post_fn_reserved(uint64_t token, void (*fn)(void *), void *arg) { return post_add_((post_t){3, NULL, 0, 0, 0, 0, fn, arg}, token); }
 
 // Commits slot i: ends its command buffers (a barrier ends the uploads), assigns the next timeline value, queues it in order. Caller holds g_lk
 static uint64_t commit_locked(int i) {

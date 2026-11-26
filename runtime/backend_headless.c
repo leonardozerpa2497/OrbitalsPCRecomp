@@ -39,6 +39,8 @@ void video_present_rgba(const u32* px, int w, int h, int stride){
   pm_unlock(&g_hl);
 }
 
+void video_motion_poll(void){} /* no SDL devices in the headless backend */
+
 void video_poll(void){
   u64 el=(plat_ns()-g_start)/1000000ull;
   g_pad.buttons= (g_buttons && el>=g_buttons_at && el<g_buttons_at+300)? g_buttons : 0;

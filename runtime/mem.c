@@ -131,6 +131,34 @@ static int guest_span_has_perm(u64 addr, u64 size, u64 alignment, u32 required_p
   return 1;
 }
 
+/* [addr, addr+size) inside one block with these permissions; only with the memory lock held (inside mem_with_range's fn) */
+int mem_span_ok_locked(u64 addr, u64 size, u32 perm){
+  for(int i=0;i<nblk;i++){
+    const MemBlock* b=&blk[i];
+    if(b->addr>addr) return 0;
+    if(addr+size<=b->addr+b->size) return b->state!=MS_FREE && b->state!=MS_INACCESSIBLE && (b->perm&perm)==perm;
+  }
+  return 0; }
+
+/* calls fn on [addr, addr+len) with the memory lock held, if that range is still inside one readable and writable block: the
+   block cannot be unmapped meanwhile (orbitals_input.c scans guest memory from its own thread) */
+int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx){
+  pm_lock(&g_memlock);
+  int ok=0;
+  for(int i=0;i<nblk;i++){
+    MemBlock* b=&blk[i];
+    if(b->addr>addr) break;
+    if(addr+len<=b->addr+b->size){ ok=(b->perm&3)==3; break; }
+  }
+  if(ok) fn(addr,len,ctx);
+  pm_unlock(&g_memlock); return ok; }
+
+/* the i-th mapped block (sorted by address): 0 past the end. For tools that scan guest memory (orbitals_input.c) */
+int mem_block(int i, u64* addr, u64* size, u32* perm){
+  pm_lock(&g_memlock);
+  int ok= i>=0 && i<nblk; if(ok){ *addr=blk[i].addr; *size=blk[i].size; *perm=blk[i].perm; }
+  pm_unlock(&g_memlock); return ok; }
+
 int guest_span_readable(u64 addr, u64 size, u64 alignment){
   return guest_span_has_perm(addr,size,alignment,PERM_R);
 }

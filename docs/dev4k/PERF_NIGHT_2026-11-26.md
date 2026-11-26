@@ -1,0 +1,74 @@
+# Co-op performance on the owner's PC (Ryzen 7 9800X3D, RTX 5090, 4K 240 Hz) — night of 2026-11-26
+
+## Current evidence
+
+The table below preserves the early baseline experiments, not the final installed build's performance.
+The corrected device-local snapshot implementation passed the differential oracle and forced fallback checks;
+[DEVICE_BASELINE_BENCH.md](DEVICE_BASELINE_BENCH.md) records its alternating runs: approximately58 FPS at1800p
+and52 FPS at2160p. Neither meets the requested <1% late-frame target. The old icon scanner has been removed;
+[LAYOUT_BENCH.md](LAYOUT_BENCH.md) records Nintendo/PlayStation comparisons without a consistent FPS regression.
+The actual `r.GTSyncType=0` experiment froze and is rejected. Paired effective mode1 runs reach58.51–58.61 FPS at1800p
+and54.75–54.93 at2160p, improving p95 and late frames outside the mode2 control spread; see [SYNC_PROBE.md](SYNC_PROBE.md).
+[FLIGHT_BENCH.md](FLIGHT_BENCH.md) records eight flight-recorder comparisons: disabling it saves about0.5–0.6 ms CPU
+and adds0.45–0.60 FPS on average. No unmeasured setting is selected from these hypotheses.
+[STAGING_BENCH.md](STAGING_BENCH.md) contains the final measured512MB combination:58.65–58.77 FPS at1800p
+and55.04–55.57 FPS at2160p. Late-frame shares remain14.89–15.86% and40.20–44.53%, respectively, above the1% goal.
+
+## Early baseline experiments
+
+Bench: `tools/dev4k/bench.sh` + scene `tools/dev4k/scenes/coop_ship.txt` (owner's save copy in the launcher test profile,
+co-op split screen in the asteroid field, both players idle), window 120-180 s, `ue_fps=60`, `env=NXRT_VK_DEFER=1` (as
+installed), launcher env as PLAY sets it (`NXRT_VK_WB_GPU=1`). Stats: `tools/dev4k/bench_stats.py` (late = interval > 17.7 ms).
+
+| Variant | runs | FPS | p50 | p95 | p99 | late % | > 30 ms % | transl. CPU ms | GPU ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2160p base | 5 | 42.17-42.56 | 22.5-22.8 | 32.9-34.6 | 37.8-38.7 | 98.9-99.5 | 7.7-8.7 | 14.1-14.5 | 19.6-19.7 |
+| 2160p `NXRT_VK_SPLIT_MS=2` | 2 | 44.11 / 43.96 | 22.1 / 22.2 | 27.4 / 27.5 | 31.8 / 31.7 | 99.5 | 1.74 / 1.71 | 14.0 / 13.8 | 19.6 |
+| 2160p `NXRT_VK_SPLIT_MS=1` | 1 | 43.65 | 22.2 | 29.4 | 34.4 | 98.6 | 4.28 | 14.8 | 19.9 |
+| 2160p `NXRT_VK_WB_GPU=0` | 2 | 42.65 / 42.34 | 22.3 / 22.4 | 30.0 / 30.3 | 31.5 / 31.7 | 100 | 4.8 / 6.2 | 15.5 | 16.9 |
+| 2160p split 2 + WB_GPU 0 + staging 512 | 2 | 42.52 / 42.05 | 22.5 / 22.8 | 29.7 / 30.0 | 31.3 / 31.9 | 100 | 3.7 / 4.9 | 15.9 / 16.0 | 16.8 / 16.9 |
+| 2160p `NXRT_VK_STAGING_MB=512` | 1 | 43.36 | 22.2 | 31.4 | 38.1 | 99.5 | 5.65 | 14.2 | 19.6 |
+| 2160p `NXRT_VK_DEFER=0` | 1 | 41.62 | 23.1 | 32.1 | 35.3 | 99.7 | 8.2 | 16.7 | 19.7 |
+| 2160p `NXRT_VK_PASS_BARRIER=0` (wrong picture) | 1 | 44.24 | 21.6 | 31.4 | 36.1 | 97.1 | 6.1 | 14.7 | 18.0 |
+| 2160p `NXRT_VK_WB_OFF=1` (test only) | 1 | game stops (svcBreak at 75 s): the CPU reads written-back data | | | | | | | |
+| 2160p `NXRT_VK_SPLIT_MS=0` | 1 | never reached the scene (rejected) | | | | | | | |
+| 2160p output, 3D 1800p (`scene_resolution=900`) | 1 | 47.12 | 20.5 | 26.9 | 30.1 | 95.8 | 1.2 | 12.5 | 17.6 |
+| 2160p output, 3D 1440p (`scene_resolution=720`) | 1 | 52.30 | 18.5 | 23.5 | 25.2 | 66.2 | 0.03 | 9.7 | 15.9 |
+| 1800p base | 1 | 47.17 | 20.6 | 26.6 | 30.0 | 95.3 | 0.99 | 12.4 | 17.5 |
+| 1620p base | 1 | 51.16 | 18.9 | 24.1 | 26.5 | 74.8 | 0.16 | 10.3 | 16.5 |
+| 1620p `NXRT_VK_SPLIT_MS=2` | 1 | 51.85 | 18.6 | 23.9 | 25.5 | 69.5 | 0.10 | 10.4 | 16.5 |
+| 1080p base | 1 | 54.55 | 17.7 | 22.7 | 23.9 | 49.9 | 0 | 8.6 | 13.9 |
+
+Selected for final validation: `NXRT_VK_SPLIT_MS=2` (outside the base's spread on FPS, p95, p99 and spikes; a submission split every 2 ms of
+recording instead of 4 lets the GPU start sooner; same picture: screenshots at the same scene moment differ only by
+animation). On the laptop 2 ms had been measured worse at p95 (vk_replay.c comment): it is a per-PC setting, applied through
+`env=` in the game's Orbitals.ini. At resume the kit ini did not yet retain this setting; the measurements used temporary
+bench overrides. DEFER=1 confirmed (2.3 ms less translation CPU than DEFER=0).
+
+## Initial bottleneck measurements (before device snapshots and sync1)
+- Even 1080p output does not hold 60 (54.6 FPS, half the frames late): a fixed cost per frame in the NVN -> Vulkan replay.
+- The game draws its 3D at the full output size (passes of 3840x2160; the Switch 2 renders 1080p) and the replay's cost grows
+  with it on both sides: translation CPU 8.6 ms (1080p) -> 14.4 ms (2160p), GPU 13.9 -> 19.7 ms.
+- Per frame at 2160p: 150-210 MB of logical writeback ranges, not compact returned bytes. The 120-180 s base-a samples average
+  165.54 MiB of logical ranges and about 4.38 MiB of compact records, plus snapshot and fallback traffic. The full comparison
+  baseline still travels through host memory. Uploads average 52.84 MiB (4.44 ms CPU). The staging ring is **256 MB**;
+  64 MB is the upload budget, not ring capacity. The ring fills (~35 waits a second, 2 at 1080p).
+- GPU timestamp intervals (`NXRT_VK_GPUTIME_AT_S`): 7.54 ms assigned to submission starts and 4.84 ms assigned to 42 small
+  dispatches include uploads, previous writebacks, preparation and barriers. They do not establish pure idle time or shader
+  execution time. Game threads wait ~18 ms a frame in nvnSyncWait; this includes completion effects and is not by itself proof
+  of an avoidable serial stall.
+
+## Historical icon scanner regression (removed)
+With the final memory-lock safety patch installed, the old PlayStation scanner severely harms frame pacing. At 1800p,
+same scene/window: PlayStation 36.03/34.37 FPS, p95 64.57/64.55 ms, p99 138.85/163.46 ms; Nintendo 48.30 FPS,
+p95 25.37 ms, p99 29.53 ms. The second PlayStation run had no OpenRGB detection, ruling out that initial explanation.
+The scanner was subsequently removed; the direct lookup replacement passed the paired comparison in LAYOUT_BENCH.md.
+
+## Remaining hypotheses and resolved work
+1. Device-local snapshots were corrected, reviewed, installed and differentially checked; see the current evidence above.
+   Readbacks on demand remain a larger alternative requiring read-fault tracking; current dirty bits detect writes only.
+2. Dependency-exact barriers (ceiling measured: PASS_BARRIER=0 gave +2 FPS / -1.7 ms GPU) and batching the 42 tiny dispatches.
+3. The final512MB staging comparison is complete; see STAGING_BENCH.md. Waiting remains and60FPS is not reached.
+4. 3D resolution below the output at 4K (`scene_resolution`) changes the picture. The early1440p-3D result was52 FPS;
+   it has not been remeasured with device-local snapshots, so it is not a proven final-build result.
+5. 90 / 120 / unlimited: not tried; nothing reaches 60 yet, and the runtime's frame pacing emulates a 60 Hz display.

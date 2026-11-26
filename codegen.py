@@ -14,6 +14,22 @@ from a64 import lit, TABLE
 
 UNCOND = ('b', 'br', 'ret', 'brk')
 
+# Guest functions that the runtime wraps (a g_disp replacement) although the game reaches them with a direct bl / b: calls to them
+# go through the dispatch table (CALLDYN) instead of a direct C call, and the module lists them in swr_dynamic_calls so the
+# runtime can tell. Module build id (first 16 bytes, hex) -> offsets in that module.
+DYNAMIC_CALLS = {
+    # Orbitals main (runtime/orbitals_buttons.h): the action prompt (icon_prompt) and the button icon lookup (icon_lookup)
+    '0f8ef52cf4eee37628f366a539d5d6ad': (0x40c5020, 0x40c5ce0),
+}
+
+
+def dynamic_call_targets(mods):
+    out = set()
+    for m in mods:
+        for off in DYNAMIC_CALLS.get(bytes(getattr(m, 'build_id', b''))[:16].hex(), ()):
+            out.add(m.base + off)
+    return out
+
 
 # ======================================================================= analysis
 class Func:
@@ -33,6 +49,7 @@ class Program:
     def __init__(self, mods, hints=()):
         self.mods = mods
         self.hints = set(hints)
+        self.dyn_calls = dynamic_call_targets(mods)
         self._lastm = None
         for m in mods:
             m._t0 = m.base + m.text[0]; m._t1 = m._t0 + m.text[1]
@@ -245,12 +262,14 @@ def emit_function(prog, f, funcs):
     if s and s[0] != f.start:
         out.append(' goto L_%X;' % f.start)
 
+    dyn = getattr(prog, 'dyn_calls', ())
+
     def tail(t):
-        if t in funcs: return '{ %s(c,%s); return; }' % (funcs[t].name, lit(t))
+        if t in funcs and t not in dyn: return '{ %s(c,%s); return; }' % (funcs[t].name, lit(t))
         return '{ CALLDYN(%s); return; }' % lit(t)
 
     def call(t):
-        if t in funcs: return '%s(c,%s);' % (funcs[t].name, lit(t))
+        if t in funcs and t not in dyn: return '%s(c,%s);' % (funcs[t].name, lit(t))
         return 'CALLDYN(%s);' % lit(t)
 
     for i, x in enumerate(s):

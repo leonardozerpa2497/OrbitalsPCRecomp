@@ -17,6 +17,11 @@ const char* g_runtime_version=SWR_RUNTIME_VERSION;
 #include "audio.h"
 #include <stdatomic.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "motion_wait.h"
+#include "orbitals_input.h"
+void video_motion_poll(void);
+#endif
 static int g_opt_null_trap;   /* null_trap= in the ini */
 
 const SwrModule* g_mod;
@@ -239,6 +244,7 @@ static void ini_apply(const char* k, const char* v){
         setenv(name,eq+1,1);
 #endif
         LOG("ini: environment %s=%s\n",name,eq+1); } } }
+    else if(!strncmp(k,"button_",7) || !strncmp(k,"gyro",4)){ extern void orbitals_input_ini(const char*, const char*); orbitals_input_ini(k,v); }
     else if(!strcmp(k,"language")) g_opt_lang=atoi(v);
     else if(!strcmp(k,"keyboard_text")){ extern char g_opt_swkbd[64]; snprintf(g_opt_swkbd,sizeof g_opt_swkbd,"%s",v); }
     else if(!strcmp(k,"log")) g_verbose=atoi(v);
@@ -326,6 +332,16 @@ static const IniOpt INI_INPUT[]={
   {"mouse_sensitivity","1.00","Mouse sensitivity: F1 10%..500% goes from 5x to 1250x speed, on a curve so 100% stays close to before"},
   {"mouse_invert","0","Mouse inversion: 0 = normal, 1 = horizontal, 2 = vertical, 3 = both"},
   {"keyboard_player","1","Keyboard and mouse: 1 = player 1, 2 = player 2 when player 1 has a gamepad"},
+  {"button_layout","nintendo","Orbitals button icons (applies on restart): nintendo = as on the Switch 2, xbox / playstation = that controller's\n;   icons in menus and in game, for every button (the buttons keep their places: accept stays on the right button)"},
+  {"button_accept_bottom","0","Experimental (with xbox / playstation): 1 = accept on the bottom button and back on the right one in the lobby, the\n;   pause menu and in game (the PC version's input). The title screen and the main menu keep the right button"},
+  {"gyro","off","Orbitals gyro aiming (motion sensors of a DualSense or other SDL pad): off, always, aim = while the left trigger is held"},
+  {"gyro_sensitivity_x","1.5","Gyro horizontal sensitivity: camera degrees per degree the controller turns"},
+  {"gyro_sensitivity_y","1.5","Gyro vertical sensitivity: camera degrees per degree the controller tilts"},
+  {"gyro_button","touchpad","Gyro button: touchpad, mute, l3, r3, paddle_left, paddle_right or none"},
+  {"gyro_button_mode","pause","pause = the gyro stops while the button is held, toggle = each press turns it off / on.\n;   Holding the button 3 s with the controller lying still calibrates it (stored per controller model)"},
+  {"gyro_tightening","3","Gyro: slow turns under this many degrees per second are softened (hand shake), 0 = off"},
+  {"gyro_invert","0","Gyro inversion: 0 = normal, 1 = horizontal, 2 = vertical, 3 = both"},
+  {"gyro_calibrate","0","1 = calibrate the gyro the next time the controller lies still for 2 s, then store it (sets itself back to 0)"},
   {NULL,NULL,NULL}};
 
 static const IniOpt INI_GRAPHICS[]={
@@ -475,6 +491,15 @@ __attribute__((weak)) const SwrModule* swr_module_static(void);
 const SwrModule* swr_module_static(void) __attribute__((weak));
 #endif
 int g_code_tcc;
+static void* g_code_dl;
+
+/* 1 when the code module was generated with guest calls to pc going through the dispatch table (codegen.py DYNAMIC_CALLS), so a
+   g_disp replacement for pc also sees the game's direct calls */
+int code_dynamic_call(u64 pc){
+  const u64* l= g_code_dl? (const u64*)plat_dl_sym(g_code_dl,"swr_dynamic_calls") : NULL;
+  for(;l && *l;l++) if(*l==pc) return 1;
+  return 0;
+}
 
 static int load_code(void){
   if(swr_module_static){ g_mod=swr_module_static(); return g_mod? 0 : -1; }
@@ -491,6 +516,7 @@ static int load_code(void){
 #endif
     WARN("Cannot find the recompiled code: %s\n",p); return -1; }
   ModFn f=(ModFn)plat_dl_sym(h,"swr_module"); if(!f){ WARN("%s is not a SwitchRecomp module\n",p); return -1; }
+  g_code_dl=h;
 #if defined(_WIN32)
   { /* tell gcc builds from tcc builds by the PE linker version (ld 2.x vs tcc 6.0). tcc code is a lot slower */
     const u8* b=(const u8*)h; u32 lf; memcpy(&lf,b+0x3C,4); u8 mj=b[lf+24+2], mn=b[lf+24+3];
@@ -597,7 +623,14 @@ int swr_main(int argc, char** argv){
       /* the first dump after 6 s: people close a frozen game before 15 */
       else if(++still==60*(dumps? 15 : 6) && dumps<4){ int sec= dumps? 15 : 6; dumps++; still=0; extern void kernel_dump_threads_stall(void);
         LOG("warning: %d s without a new image (frames=%d, GPU submits=%llu)\n",sec,g_frames,(unsigned long long)g_gpu_submits); kernel_dump_threads_stall(); } }
-    next+=16666667ull; u64 now=plat_ns(); if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
+    next+=16666667ull; u64 now=plat_ns();
+    if(next>now){
+#ifdef _WIN32
+      if(orbitals_gyro_wanted()) motion_wait_until(next,plat_ns,plat_sleep_ns,video_motion_poll);
+      else
+#endif
+        plat_sleep_ns((i64)(next-now));
+    } else if(now-next>100000000ull) next=now;
   }
   hid_rumble_stop();
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } LOG("Exit.\n"); fflush(NULL);

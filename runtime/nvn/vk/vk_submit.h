@@ -19,6 +19,12 @@ uint64_t vks_recording_value(void);           // the timeline value the submissi
 void vks_post_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // written after completion: mode 0 write, 1 add
 void vks_post_counter(uint64_t addr, uint32_t type);                       // the 16-byte counter record written after completion
 void vks_post_fn(void (*fn)(void *), void *arg);                           // run after completion, before waiters return
+// Room for one vks_post_fn in the submission being recorded, set aside now (before a dispatch) so that posting its effect after it cannot fail:
+// a token (0: no submission or no memory). vks_post_fn_reserved posts into it (a token of another submission posts as vks_post_fn does); it returns 1:
+// no memory for an effect, reserved or not, ends the run before its submission can complete. vks_post_unreserve gives it back unused
+uint64_t vks_post_reserve(void);
+int vks_post_fn_reserved(uint64_t token, void (*fn)(void *), void *arg);
+void vks_post_unreserve(uint64_t token);
 void vks_split(void);
 uint64_t vks_commit(void);                    // gfx_sub_commit: ends the submission, returns its fence value
 void vks_flush(void);                         // hands every committed submission to the queue (one vkQueueSubmit2)

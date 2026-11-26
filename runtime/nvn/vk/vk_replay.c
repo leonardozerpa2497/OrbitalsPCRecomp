@@ -223,7 +223,7 @@ static void barrier_all(VkCommandBuffer cb) {
 static vkm_writeback g_wb[256]; static int g_nwb;
 static void wb_add(uint64_t addr, uint64_t size) {
     for (int i = 0; i < g_nwb; i++) if (g_wb[i].a == addr && g_wb[i].n == size) return;
-    if (g_nwb < 256) { g_wb[g_nwb].a = addr; g_wb[g_nwb].n = size; g_wb[g_nwb++].base = 0; }
+    if (g_nwb < 256) g_wb[g_nwb++] = (vkm_writeback){.a = addr, .n = size};
 }
 static void wb_flush(void) {
     vkm_gpu_writebacks(g_wb, g_nwb);
@@ -1800,7 +1800,10 @@ static void dispatch(const p_dispatch *dp) {
     VkDescriptorSet ds = write_set(cs, 5, &swrites);
     if (!ds) return;
     barrier_all(cb);
-    for (int i = 0; i < g_nwb; i++) g_wb[i].base = vkm_wb_base(g_wb[i].a, g_wb[i].n);   // the ranges before the shader: only the words it changes go back to guest memory
+    int snap = 0;
+    for (int i = 0; i < g_nwb; i++) snap |= vkm_wb_prepare(&g_wb[i]);   // the ranges before the shader: only the words it changes go back to guest memory
+    // The snapshot copies read what the shader is about to write: the shader waits for them (write after read: an execution dependency is enough)
+    if (snap) vk_mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe); g_last_pipe = VK_NULL_HANDLE;
     if (!cs->push) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
     if (g_pd) {
@@ -2537,6 +2540,7 @@ void vkr_sub_begin(void) {
     g_nubr = 0;   // (ubstat: the updates of earlier submissions are in the pools on the GPU's timeline already)
     g_split_t = now_ns(); g_split_ms = vkc_int("split_ms", 4);   // 4 ms: the GPU starts sooner on a long submission (co-op corridor 51.3 -> 53.0 FPS, p95 23.0 ms; 2 ms is no faster and worse at p95)
     memset(&g_sub, 0, sizeof g_sub); g_memo_sub++;   // the texture / sampler memo starts again with each submission
+    vkm_wb_drop(g_wb, g_nwb);   // (none: the last submission's end wrote them back; a plan left over would hold the write-back ring)
     P.valid = 0; P.open = 0; P.query = -1; g_last_pipe = VK_NULL_HANDLE; g_nwb = 0; g_nrtrb = 0; ds_forget();
     if (!S) S = rs_get(0);
     g_rc_npend = 0; S->render_skip = 0;

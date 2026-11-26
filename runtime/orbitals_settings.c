@@ -78,6 +78,7 @@ void orbitals_scene_init(void){
     orbitals_widget_install(mod);
 #endif
     orbitals_parse_res_install(mod);
+    { extern void orbitals_input_install(const SwrModInfo*); orbitals_input_install(mod); }
     if(mod->size<0x9c48a38 || mod->text_size<0x2ddc5c8) return;
     u64 load=mod->base+0x2ddc5bc;
     if(gr32(load)!=0x90037368 || gr32(load+4)!=0xf9451908 || gr32(load+8)!=0xbd400100) return;

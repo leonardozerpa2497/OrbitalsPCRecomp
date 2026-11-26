@@ -24,7 +24,20 @@ static struct {
   void (*SetGamepadEventsEnabled)(bool);
   void (*UpdateGamepads)(void);
   void (*free)(void*);
+  /* optional (motion): */
+  bool (*GamepadHasSensor)(SDL_Gamepad*,int);
+  bool (*SetGamepadSensorEnabled)(SDL_Gamepad*,int,bool);
+  bool (*GetGamepadSensorData)(SDL_Gamepad*,int,float*,int);
+  void (*SetEventEnabled)(u32,bool);
+  int (*PeepEvents)(void*,int,int,u32,u32);
 } sdl;
+/* SDL3 constants: SDL_SENSOR_ACCEL / GYRO, SDL_EVENT_GAMEPAD_SENSOR_UPDATE, SDL_GETEVENT */
+enum { SDL_ACCEL=1, SDL_GYRO=2, SDL_EV_SENSOR=0x659, SDL_GET=2 };
+/* SDL_GamepadSensorEvent inside the 128 byte SDL_Event */
+typedef struct { u32 type, reserved; u64 timestamp; u32 which; i32 sensor; float data[3]; u32 pad_; u64 sensor_timestamp; u8 rest[128-48]; } SdlSensorEvent;
+static int motion_on, motion_events;
+enum { MOTION_RING=256 };
+static struct { PadMotion s[MOTION_RING]; int head, n; float accel[3]; int sensors, events; u64 last_event_ns; } motion[WIN_GAMEPAD_SLOTS];
 static bool sdl_active;
 static struct { u32 id; SDL_Gamepad* handle; } sdl_slots[WIN_GAMEPAD_SLOTS];
 static ULONGLONG next_scan;
@@ -57,6 +70,9 @@ static bool load_sdl(void){
   SDL_BIND(free);
 #undef SDL_BIND
   sdl.RumbleGamepad=(__typeof__(sdl.RumbleGamepad))GetProcAddress(lib,"SDL_RumbleGamepad");
+#define SDL_OPT(name) sdl.name=(__typeof__(sdl.name))GetProcAddress(lib,"SDL_" #name)
+  SDL_OPT(GamepadHasSensor); SDL_OPT(SetGamepadSensorEnabled); SDL_OPT(GetGamepadSensorData); SDL_OPT(SetEventEnabled); SDL_OPT(PeepEvents);
+#undef SDL_OPT
   if(!sdl.Init(0x2000)){ FreeLibrary(lib); return false; } /* SDL_INIT_GAMEPAD */
   sdl.SetGamepadEventsEnabled(false);
   sdl.SetJoystickEventsEnabled(false);
@@ -89,6 +105,7 @@ static void sdl_scan(void){
     sdl.CloseGamepad(sdl_slots[i].handle);
     sdl_slots[i].handle=NULL;
     sdl_slots[i].id=0;
+    memset(&motion[i],0,sizeof motion[i]);
   }
   u32* ids=sdl.GetGamepads(NULL);
   if(!ids) return;
@@ -100,6 +117,7 @@ static void sdl_scan(void){
       if(!handle) continue;
       sdl_slots[i].id=*id;
       sdl_slots[i].handle=handle;
+      memset(&motion[i],0,sizeof motion[i]);
       break;
     }
   }
@@ -118,6 +136,8 @@ static void sdl_pad(int i, WinGamepad* out){
   static const int bits[]={1,0,3,2,11,-1,10,4,5,6,7,13,15,12,14};
   for(unsigned b=0;b<sizeof bits/sizeof bits[0];b++)
     if(bits[b]>=0 && sdl.GetGamepadButton(pad,(int)b)) out->pad.buttons|=1ull<<bits[b];
+  for(int b=0;b<21;b++) if(sdl.GetGamepadButton(pad,b)) out->sdl_buttons|=1u<<b;
+  out->has_gyro=motion[i].sensors;
   out->pad.lx=deadzone(sdl.GetGamepadAxis(pad,0));
   out->pad.ly=sdl_vertical(sdl.GetGamepadAxis(pad,1));
   out->pad.rx=deadzone(sdl.GetGamepadAxis(pad,2));
@@ -158,12 +178,74 @@ static void xinput_poll(WinGamepad pads[WIN_GAMEPAD_SLOTS]){
   }
 }
 
+static void motion_push(int i, u64 t, const float* gyro){
+  PadMotion* m=&motion[i].s[(motion[i].head+motion[i].n)%MOTION_RING];
+  m->t_ns=t; memcpy(m->gyro,gyro,sizeof m->gyro); memcpy(m->accel,motion[i].accel,sizeof m->accel);
+  if(motion[i].n<MOTION_RING) motion[i].n++; else motion[i].head=(motion[i].head+1)%MOTION_RING;
+}
+
+/* every sensor sample arrives as an SDL event with its own timestamp; without events (an older SDL3) the latest reading,
+   timed by this poll */
+static void motion_poll(void){
+  if(!sdl.GamepadHasSensor || !sdl.SetGamepadSensorEnabled || !sdl.GetGamepadSensorData) return;
+  if(!motion_events && sdl.SetEventEnabled && sdl.PeepEvents){ sdl.SetEventEnabled(SDL_EV_SENSOR,true); motion_events=1; }
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+    SDL_Gamepad* pad=sdl_slots[i].handle;
+    if(!pad || motion[i].sensors) continue;
+    if(sdl.GamepadHasSensor(pad,SDL_GYRO) && sdl.SetGamepadSensorEnabled(pad,SDL_GYRO,true)){
+      if(sdl.GamepadHasSensor(pad,SDL_ACCEL)) sdl.SetGamepadSensorEnabled(pad,SDL_ACCEL,true);
+      motion[i].sensors=1;
+    } else motion[i].sensors=-1;   /* no gyro: not asked again until it reconnects */
+  }
+  u64 now=plat_ns();
+  if(motion_events){
+    SdlSensorEvent ev[64]; int n;
+    while((n=sdl.PeepEvents(ev,64,SDL_GET,SDL_EV_SENSOR,SDL_EV_SENSOR))>0){
+      for(int k=0;k<n;k++) for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+        if(!sdl_slots[i].id || ev[k].which!=sdl_slots[i].id) continue;
+        motion[i].events=1; motion[i].last_event_ns=now;
+        if(ev[k].sensor==SDL_ACCEL) memcpy(motion[i].accel,ev[k].data,sizeof motion[i].accel);
+        else if(ev[k].sensor==SDL_GYRO) motion_push(i,ev[k].sensor_timestamp? ev[k].sensor_timestamp : ev[k].timestamp,ev[k].data);
+      }
+      if(n<64) break;
+    }
+  }
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+    SDL_Gamepad* pad=sdl_slots[i].handle;
+    if(!pad || motion[i].sensors!=1 || motion[i].events) continue;
+    /* Once events have worked, silence means stale data; do not resurrect a cached rate with a fresh host timestamp. */
+    float g[3];
+    sdl.GetGamepadSensorData(pad,SDL_ACCEL,motion[i].accel,3);
+    if(sdl.GetGamepadSensorData(pad,SDL_GYRO,g,3)) motion_push(i,now,g);
+  }
+}
+
+void win_gamepads_motion_enable(int on){
+  if(!sdl_active || motion_on==!!on) return;
+  motion_on=!!on;
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+    SDL_Gamepad* pad=sdl_slots[i].handle;
+    if(!on && pad && motion[i].sensors==1 && sdl.SetGamepadSensorEnabled){ sdl.SetGamepadSensorEnabled(pad,SDL_GYRO,false); sdl.SetGamepadSensorEnabled(pad,SDL_ACCEL,false); }
+    memset(&motion[i],0,sizeof motion[i]);
+  }
+  if(!on && motion_events && sdl.SetEventEnabled){ sdl.SetEventEnabled(SDL_EV_SENSOR,false); motion_events=0; }
+}
+
+int win_gamepads_motion(int slot, PadMotion* out, int max){
+  if(slot<0 || slot>=WIN_GAMEPAD_SLOTS) return 0;
+  int n=motion[slot].n<max? motion[slot].n : max;
+  for(int k=0;k<n;k++) out[k]=motion[slot].s[(motion[slot].head+k)%MOTION_RING];
+  motion[slot].head=(motion[slot].head+n)%MOTION_RING; motion[slot].n-=n;
+  return n;
+}
+
 void win_gamepads_poll(WinGamepad pads[WIN_GAMEPAD_SLOTS]){
   memset(pads,0,sizeof *pads*WIN_GAMEPAD_SLOTS);
   if(sdl_active){
     sdl.UpdateGamepads();
     ULONGLONG now=GetTickCount64();
     if(now>=next_scan){ sdl_scan(); next_scan=now+250; }
+    if(motion_on) motion_poll();
     for(int i=0;i<WIN_GAMEPAD_SLOTS;i++) sdl_pad(i,&pads[i]);
   }else xinput_poll(pads);
   for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){

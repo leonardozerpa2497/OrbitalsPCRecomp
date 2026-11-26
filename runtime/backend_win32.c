@@ -550,6 +550,27 @@ static void script_file_poll(void){
       (unsigned long long)g_script_base_ms,((plat_ns()-g_start)/1000000ull-g_script_base_ms)/1000.0);
 }
 
+static int gyro_input_allowed;
+static void gyro_poll_devices(const WinGamepad* devices, int allowed){
+  int want=orbitals_gyro_wanted(); win_gamepads_motion_enable(want);
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
+    PadMotion m[256]; int n=want? win_gamepads_motion(i,m,256) : 0;
+    orbitals_gyro_pad(i,devices[i].id,devices[i].vendor,devices[i].product,devices[i].sdl_buttons,
+                      devices[i].zl,m,n,devices[i].has_gyro==1,allowed);
+  }
+}
+/* Same frontend thread as video_poll: SDL handles and its event queue have a single owner.
+   Do not publish HID, advance scripts or drive settings here. Recheck focus before every batch. */
+void video_motion_poll(void){
+  WinGamepad devices[WIN_GAMEPAD_SLOTS];
+  win_gamepads_poll(devices);
+  int allowed=gyro_input_allowed && GetForegroundWindow()==g_hwnd && !g_controls_open && !settings_open();
+  /* Suppress the batch as soon as the real-pad settings chord is held; video_poll still owns opening the panel. */
+  const u64 chord=(1ull<<6)|(1ull<<7)|(1ull<<10); /* L + R + Plus, as in settings_controller */
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++) if((devices[i].pad.buttons&chord)==chord) allowed=0;
+  gyro_poll_devices(devices,allowed);
+}
+
 void video_poll(void){
   if(g_script_file[0]) script_file_poll();
   int foreground=GetForegroundWindow()==g_hwnd && !g_controls_open;
@@ -579,6 +600,8 @@ void video_poll(void){
   }
   /* Observe held test buttons even when the panel is closed. Opening with a held button must not act on it again. */
   int panel_input=settings_controller(devices,scripted,foreground);
+  gyro_input_allowed=focused && !panel_input;
+  gyro_poll_devices(devices,gyro_input_allowed);
   focused=focused && !panel_input;
   static u32 last_ids[WIN_GAMEPAD_SLOTS];
   for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
