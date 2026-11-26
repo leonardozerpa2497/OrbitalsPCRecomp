@@ -29,8 +29,14 @@ until it is moved out.
 ## How it turns the camera
 **PC validation, 08:44:** the earlier gate (view target == `AController::Pawn`) was disproved: it opened briefly during the title
 world's initialization and closed in the actual co-op ship scene, where each player's view target is a separate controlled actor.
-Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. It is replaced by the game-specific gate below
-(offline tests only so far; the PC checks are listed under "Not verified").
+Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. It is replaced by the game-specific gate below.
+
+**PC validation, 09:24 run `controls-native-gate-ps`:** title/menu controllers stay closed by type; both ship roles open at91.34s,
+after the intro cinematic closes the gate through IgnoreLookInput. The synthetic test starts on ControllerId1 at94.35s and passes
+at96.69s: yaw −134.460° and pitch45.000°, both0.00% error. The co-op screenshot at110s visibly shows the second player's changed
+view while the first player's view remains directed toward the wreck. At126.92s P1 closes for shared pause; P2 has no UpdateRotation
+for15050ms. At141.97s gameplay resumes, and the resumed screenshot shows no accumulated-turn jump. Evidence: the run's Orbitals.log
+under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,resumed}_s.png` under `/tmp/claude-1000/orb/`.
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
@@ -134,9 +140,10 @@ Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. 
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
 
 ## Not verified
-- The new gate is checked only offline. Still to observe on the PC: title and menus closed, both co-op ship roles open, on foot,
-  a cutscene, pause / resume for both players, the synthetic test enabled late in gameplay, and a visible camera turn. A synthetic
-  PASS during initialization is not acceptance.
+- Still to observe on the PC: on-foot gameplay, an additional cinematic beyond the intro, physical-pad directional feel and
+  separate synthetic camera proof for player1. Title/menu rejection, both ship gates, player2 synthetic motion and pause/resume
+  have been observed as recorded above. The test was armed at startup but waited for continuous gameplay; no initialization PASS
+  is counted as acceptance.
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
   if it is the other way.
 - Steam Input / DS5Bridge can take the pad's sensors before SDL; the log line `gyro: P1 ... has a gyro` confirms SDL sees them.

@@ -3,8 +3,13 @@
 Ini keys (Orbitals.ini, launcher Controls page): `button_layout=nintendo|xbox|playstation`, `button_accept_bottom=0|1`.
 Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming PC on 2026-11-26.
 
-## Icons (not working in the current PC validation)
-The 08:30-08:44 PC runs with PlayStation selected still show Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
+## Icons (PlayStation observed on the PC; Xbox and performance gates pending)
+The regenerated module and reviewed runtime were installed at 09:24. Run `controls-native-gate-ps` shows Cross for Select in the
+main menu, R2 for both players' co-op prompts, Square for the second player's action and Circle for Back in pause. The bounded
+trace records actual replacement textures from caller main+40c4ed4. Screenshots are in `/tmp/claude-1000/orb/controls-native-gate-ps-*_s.png`.
+Settings and Xbox still need their own captures, and the final Nintendo/PlayStation performance comparison remains pending.
+
+Before this fix, the 08:30-08:44 PC runs with PlayStation selected showed Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
 The regenerated module exports the dynamic lookup and both generated caller chunks use `CALLDYN`, but the opt-in
 `SWR_ICON_TRACE=1` logs no calls to the wrapper. The installation log alone is not proof that a prompt reaches it.
 - Root cause (from `main.bin`, 2026-11-26): those prompts never call the icon lookup main+0x40c5ce0. They go through the action
@@ -14,7 +19,7 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   Desktop 0 and writes `*keyboard`, or, without one, the asset's default texture (+0x80), `*label = true` and a copy of that keyboard
   key into `*labelKey` (so x5 is never the gamepad key). Its only references are two direct `bl` (0x40c4ed0 in the input-action
   widget, 0x40d3990), both zeroing `*pad` first.
-- Fix (built offline, not yet run on the PC): `codegen.py` `DYNAMIC_CALLS` now lists 0x40c5020 too, and the runtime wraps it
+- Fix (now built and observed on the PC): `codegen.py` `DYNAMIC_CALLS` now lists 0x40c5020 too, and the runtime wraps it
   (`icon_prompt`, runtime/orbitals_buttons.h; install with its own fail-closed word checks, `icon_prompt_install`). Before the call,
   while the caller holds the asset (exactly the original's own lifetime for it), it lists for every live `InputIcons` key (allocation
   bits) its Switch texture and that key's PlayStation / Xbox texture, through each key's platform-map hash as the game does. After the
@@ -35,8 +40,8 @@ The regenerated module exports the dynamic lookup and both generated caller chun
 - The game ships every icon: `DA_PlatformInputIcons` maps each FKey to a texture per `EPlatformType`
   (Desktop 0, Playstation 1, Xbox 2, Switch 3). The Switch 2 build always draws the Switch entry (which reuses the Xbox
   letter textures, swapped to the Nintendo positions).
-- `button_layout=playstation|xbox` (current design, no memory scan; built 2026-11-26 from `main.bin`, not yet run on the PC):
-  every icon lookup goes through one native function, `UMoreporkInputIconDataAsset` lookup main+0x40c5ce0
+- `button_layout=playstation|xbox` also wraps the separate per-key route (no memory scan):
+  explicit per-key icon lookups go through `UMoreporkInputIconDataAsset` lookup main+0x40c5ce0
   `(asset, const FKey*, EPlatformType, UTexture2D** out) -> bool` (InputIcons TMap at asset+0x30, 0x70-byte elements; the
   per-platform TMap inside, 0x18-byte elements: key byte, texture at +8). Its only callers: the `GetIconBrushForKey` exec
   (main+0x40b2d20, bl at 0x40b2e64: Blueprint prompts) and the native icon widget (bl at 0x4634a78: asks Switch 3 through the shared
