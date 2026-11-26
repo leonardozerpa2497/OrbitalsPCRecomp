@@ -1,6 +1,6 @@
 # Dispatch write-back snapshots in device memory (`NXRT_VK_WB_BASE_DEVICE`)
 
-Status: implemented, default off, **not measured on the PC yet**. Code: `runtime/nvn/vk/vk_wb_core.h` (ring, plans, post
+Status: implemented, default off; **PC differential checks passed, performance comparison in progress**. Code: `runtime/nvn/vk/vk_wb_core.h` (ring, plans, post
 room; no Vulkan, tested on the host by `tests/test_wb_core.c`), `runtime/nvn/vk/vk_mem.c` (`vkm_wb_prepare`, `wb_make`,
 `wrd_init`, `gpu_wrote_base`, `wd_emit`), `runtime/nvn/vk/vk_submit.c` (`vks_post_reserve`),
 `runtime/nvn/vk/vk_replay.c` (`dispatch`, `vkr_sub_begin`).
@@ -60,14 +60,26 @@ log their reason (`a range gets the host plan (...)`). D counts planned write-ba
 with the post room reserved before the shader it must stay 0 (it can only move for a plan left over from another
 submission, which `vkm_wb_drop` at a submission's start rules out). With wb_gpu 2: `wb_gpu per frame: ... checked N ranges so far, M blocks differing` (M must stay 0).
 
-## PC test plan (parent runs it; nothing here has run on the PC)
+## PC validation
+On the gaming PC with the copied test profile, 2160p co-op, the reviewed implementation built and booted successfully:
+
+- `wb-device-oracle2160`, `WB_GPU=2`, `WB_BASE_DEVICE=1`: **1,832,592 ranges checked, zero differing blocks, zero dropped**.
+  The log confirms the device-local ring and approximately 80 MB/frame of device snapshots in gameplay. Natural host fallbacks
+  also occurred. The screenshot `wb-device-oracle2160_s.png` shows the expected two-player ship scene.
+- `wb-forced-camera2160`, additionally `WB_BASE_DEVICE_FAIL=1`: **1,672,583 ranges checked, zero differing blocks,
+  1,767,109 forced host fallbacks, zero dropped**. Device snapshot bytes stayed zero. This run also exercised pause/resume;
+  its timing is not a performance comparison.
+- Evidence is under `/tmp/claude-1000/bench/<run>/Orbitals.log`; screenshots under `/tmp/claude-1000/orb/`.
+  These finite runs do not prove every allocation-failure or concurrent lifetime case; the host regression tests cover modeled cases.
+
+Remaining measurement plan:
 1. `WB_GPU=2, WB_BASE_DEVICE=1`: `checked` grows, differing blocks 0, device MB > 0, dropped 0, picture normal.
 2. Same plus `WB_BASE_DEVICE_FAIL=3`: host and device MB both > 0, forced count grows, differing 0, dropped 0.
 3. `WB_GPU=1` A/B/A/B with and without `WB_BASE_DEVICE=1` (SPLIT_MS=2, DEFER=1, STAGING 256) at 1800p and 2160p;
    expect host snapshot MB/frame ~0 with the switch on. Performance claims only from those runs.
 
 ## Host tests
-`cc -O1 -g -fsanitize=address,undefined -Iruntime/nvn/vk tests/test_wb_core.c -o /tmp/wbcore && /tmp/wbcore` (ends
+`gcc -O1 -g -fsanitize=address,undefined -Iruntime/nvn/vk tests/test_wb_core.c -o /tmp/wbcore && /tmp/wbcore` (ends
 `OK`). It runs the real `vk_wb_core.h` helpers: the review's two-range case (the pre-fix end rule overlaps, held
 plans do not), 200 000 random dispatches mixing device, host GPU, host CPU and whole-range write-backs with the
 completion thread landing at random points (no piece handed out over room a record still owes), transactional plans
