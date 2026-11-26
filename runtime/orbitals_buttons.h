@@ -12,6 +12,12 @@
 static GuestFn icon_lookup_orig; static int g_icon_want;   /* 1 Playstation, 2 Xbox */
 static void icon_lookup(CPU* c, u64 entry){
   u8 plat=(u8)c->x[2];
+  /* Opt-in, bounded evidence of the actual caller/platform; installation alone does not prove a prompt uses this lookup. */
+  static int trace=-1; static unsigned traced;
+  int tracing=__atomic_load_n(&trace,__ATOMIC_RELAXED);
+  if(tracing<0){ tracing=getenv("SWR_ICON_TRACE")!=NULL; __atomic_store_n(&trace,tracing,__ATOMIC_RELAXED); }
+  if(tracing && __atomic_fetch_add(&traced,1,__ATOMIC_RELAXED)<16)
+    LOG("Orbitals: icon lookup reached: platform %u, wanted %d, caller %llx\n",plat,g_icon_want,(unsigned long long)c->x[30]);
   if(!(plat==3 || (plat==2 && g_icon_want==1))){ icon_lookup_orig(c,entry); return; }
   u64 x0=c->x[0], x1=c->x[1], x3=c->x[3], lr=c->x[30], out0=gr64(x3);
   c->x[2]=(u64)g_icon_want;
