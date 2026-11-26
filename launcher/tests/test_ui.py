@@ -348,6 +348,22 @@ class LauncherWindowTest(LauncherWindow):
         dialog.assert_not_called()
         self.assertEqual(app.profiles.settings["keyboard"], 2)
 
+    def test_button_layout_choice_persists_and_locks_during_game(self):
+        app = self.window()
+        with patch.object(page_settings, "gamepad_inventory", return_value=("SDL3", [])):
+            app.show("Controls")
+            choice = self.row(app, "Button layout")
+            self.assertNotIn("Accept with the bottom button", [row.caption for row in app.view.rows.items])
+            for expected in ("Nintendo", "Xbox", "PlayStation"):
+                choice.press()
+                app.flush()
+                self.assertEqual(core.Profiles(app.profiles.root).settings["button_layout"], expected)
+            app.process = object()
+            app.view.rows.sync()
+            choice.press()
+            self.assertEqual(app.settings()["button_layout"], "PlayStation")
+            app.process = None
+
     def test_settings_are_kept_as_they_change(self):
         app = self.window()
         app.show("Settings")

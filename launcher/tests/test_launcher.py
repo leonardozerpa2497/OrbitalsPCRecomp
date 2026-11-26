@@ -353,20 +353,31 @@ class LocalStateTest(unittest.TestCase):
 
     CONTROL_KEYS = {"button_layout", "gyro", "gyro_sensitivity_x", "gyro_sensitivity_y", "gyro_button", "gyro_button_mode", "gyro_calibrate"}
 
-    def test_controls_defaults_write_only_the_playstation_icons(self):
+    def test_controls_defaults_select_playstation_buttons_and_icons(self):
         ini = self.launched_ini()
         self.assertEqual({key: ini[key] for key in self.CONTROL_KEYS & set(ini)}, {"button_layout": "playstation"})
-        self.assertNotIn("button_accept_bottom", ini)
+        self.assertEqual(ini["button_accept_bottom"], "1")
 
     def test_button_layout_xbox_and_playstation(self):
-        self.assertEqual(self.launched_ini(button_layout="Xbox")["button_layout"], "xbox")
-        self.assertEqual(self.launched_ini(button_layout="PlayStation")["button_layout"], "playstation")
-        self.assertNotIn("button_layout", self.launched_ini(button_layout="Nintendo"))
+        for layout, value in (("Xbox", "xbox"), ("PlayStation", "playstation")):
+            ini = self.launched_ini(button_layout=layout)
+            self.assertEqual(ini["button_layout"], value)
+            self.assertEqual(ini["button_accept_bottom"], "1")
+        ini = self.launched_ini(button_layout="Nintendo")
+        self.assertNotIn("button_layout", ini)
+        self.assertNotIn("button_accept_bottom", ini)
 
-    def test_accept_bottom_only_with_a_layout(self):
-        self.assertEqual(self.launched_ini(button_layout="PlayStation", button_accept_bottom=True)["button_accept_bottom"], "1")
-        self.assertNotIn("button_accept_bottom", self.launched_ini(button_layout="PlayStation", button_accept_bottom=False))
-        self.assertNotIn("button_accept_bottom", self.launched_ini(button_layout="Nintendo", button_accept_bottom=True))
+    def test_retired_checkbox_does_not_override_layout(self):
+        for legacy in (True, False):
+            for layout in ("Xbox", "PlayStation"):
+                self.assertEqual(self.launched_ini(button_layout=layout, button_accept_bottom=legacy)["button_accept_bottom"], "1")
+            self.assertNotIn("button_accept_bottom", self.launched_ini(button_layout="Nintendo", button_accept_bottom=legacy))
+
+    def test_nintendo_clears_previous_game_ini_accept_override(self):
+        (self.native / "Orbitals.ini").write_text("button_layout=playstation\nbutton_accept_bottom=1\n")
+        ini = self.launched_ini(button_layout="Nintendo")
+        self.assertNotIn("button_layout", ini)
+        self.assertNotIn("button_accept_bottom", ini)
 
     def test_gyro_always_writes_the_five_keys(self):
         ini = self.launched_ini(gyro="Always", gyro_sensitivity_x=2.25, gyro_sensitivity_y=0.5, gyro_button="Right paddle",
