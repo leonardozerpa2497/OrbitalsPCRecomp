@@ -1,6 +1,6 @@
 # Frame synchronization experiment
 
-Keep the game's default `r.GTSyncType=2` until an alternative passes a real gameplay run. Setting it to zero produced a reproducible stopped frame counter in the observed run, not a usable performance result.
+Keep the game's default `r.GTSyncType=2` until an alternative passes the alternating benchmark and stability checks. Setting it to zero produced a confirmed stopped frame counter in the observed run, not a usable performance result.
 
 ## What was measured
 
@@ -21,6 +21,11 @@ This suggests a visibility/RHI task dependency exposed by extra overlap, but doe
 
 ## Bounded next experiment
 
-The game's embedded help distinguishes mode 0 (render N−1, RHI N−2), mode 1 (RHI N−1), and mode 2 (swapchain flip). Mode 1 is a candidate, not an accepted fix. A local mode-1 overlay has been prepared but has not run. Before interpreting its FPS, confirm effective CVar 1/1, successful arrival in the same co-op scene, continued frames throughout the measurement window and unchanged images. Any retained change still requires two alternating runs per target resolution.
+The game's embedded help distinguishes mode 0 (render N−1, RHI N−2), mode 1 (RHI N−1), and mode 2 (swapchain flip).
+Mode1 probe `device-syncpak1-2160-probe` completed: effective CVar1/1 confirmed by `/tmp/orbitals-syncpak1-live.txt`,
+same co-op scene visually confirmed at125s, and3269 frames in the120–180s measurement window. It gave54.51 FPS,
+p5017.30 ms, p9524.73 ms, p9929.16 ms,44.40% late,0.70% above30 ms, translation CPU13.75 ms and GPU13.33 ms.
+This is a promising single run, not an accepted optimization or proof of long-session stability. The alternating
+mode2/1 comparison at1800p and2160p is next; both variants use the same PlayStation layout and FLIGHT0 configuration.
 
 Undo any sync experiment by removing `env=SWR_ROMFS_EXTRA_OVERLAY=...` from the test INI. Do not change the owner profile or replace the original game pak.
