@@ -19,7 +19,8 @@ $t=[IO.File]::ReadAllText($ini) -replace "(?s)\r?\n; bench begin.*?; bench end",
 $x=[IO.File]::ReadAllText("C:\llm\tmp\orb\ini-extra.txt")
 [IO.File]::WriteAllText($ini, $t.TrimEnd() + "`r`n; bench begin`r`n" + $x + "; bench end`r`n")
 (Get-Item "C:\llm\tmp\orb\input.txt").LastWriteTime=Get-Date
-Start-ScheduledTask lz-orb-bench' >/dev/null
+Start-ScheduledTask lz-orb-bench; Start-Sleep 3
+Start-ScheduledTask lz-orb-front' >/dev/null
 echo "bench $tag: started $(date +%H:%M:%S), ${secs}s"
 sleep "$secs"
 ps '$ini="$env:USERPROFILE\Desktop\OrbitalsPCRecomp-0.1.5\games\Orbitals\Orbitals.ini"
