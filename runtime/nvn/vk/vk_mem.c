@@ -853,7 +853,7 @@ static void wb_post_planned(wb_t *w) {
     gpu_pending(w->addr, w->len, 1);
     w->ring_end = wbp_release(&g_ring, &w->plan);
     if (vks_post_fn_reserved(w->tok, wb_land, w)) return;
-    gpu_pending(w->addr, w->len, -1); atomic_fetch_add(&s_wbb_drop, 1);   // (only when the post room was lost: a record left over from another submission)
+    gpu_pending(w->addr, w->len, -1); atomic_fetch_add(&s_wbb_drop, 1);   // (not reached: vks_post_fn_reserved ends the run when it has no memory)
     if (g_wb_dropped_said++ < 10) VKRED("write-back of %#llx (%llu bytes) dropped: no room for its landing", (unsigned long long)w->addr, (unsigned long long)w->len);
     free(w);
 }

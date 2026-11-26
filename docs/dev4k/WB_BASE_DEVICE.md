@@ -27,6 +27,12 @@ check compares the GPU's records (made from the device snapshot) against its own
   that cannot be completed (forced by `NXRT_VK_WB_BASE_DEVICE_FAIL` before any room is taken, ring full, no memory for
   its record) is rewound before the host plan is tried, so it never costs the host plan its room. After the shader
   each range takes exactly the path planned for it; nothing there allocates, and nothing degrades to the whole range.
+- No memory for a completion effect (any submission, flag on or off): an ordinary post (event, counter, write-back,
+  or a reserved token from another submission) that finds the queue full and cannot grow it ends the run
+  (`post_fatal` in `vk_submit.c`, via `postq_push_must`) while the submission is still being recorded, so no fence value
+  is ever published as done with an effect missing. Before, the effect was dropped with a log line and the guest saw
+  the submission complete without it (review finding: 16 posts in 16 entries, then a landing and an event lost).
+  Posts into reserved room never allocate.
 - Ring reclamation: a landing releases the ring up to the end it was posted with, and landings run in post order. A
   range's room is taken before the shader but its landing is posted after it, after the landings of earlier ranges
   and copies, so a plan is *held* from when its room is taken until its landing is posted (or the plan is given up:

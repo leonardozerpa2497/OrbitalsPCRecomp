@@ -5,6 +5,7 @@
 #include "vk_submit.h"
 #include "vk_wb_core.h"
 #include <process.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -189,12 +190,18 @@ uint64_t vks_oldest_recording(uint64_t *assigned) {
     return m;
 }
 
-// reserved: the token of room set aside by vks_post_reserve (0: none; a token of another slot is not this slot's room). 0 when there was no memory for it
+// No memory for a completion effect: the submission being recorded must not complete without it (a guest event, counter or write-back silently
+// lost while its fence value reads done). Nothing of it was committed yet, so ending the run here publishes no completion. VKLOG: VKRED may be spent
+static void post_fatal(const postq_t *q) {
+    VKLOG("[RED] no memory for a completion effect (%llu queued, room for %llu): ending the run rather than completing the submission without it", (unsigned long long)q->n, (unsigned long long)q->cap);
+    fflush(NULL); abort();
+}
+// reserved: the token of room set aside by vks_post_reserve (0: none; a token of another slot is not this slot's room: it posts as an ordinary
+// effect). Always 1: with no memory the run ends (post_fatal)
 static int post_add_(post_t p, uint64_t reserved) {
     if (g_cur < 0) { VKRED("completion effect posted outside a submission (kind %d): applied now", p.kind); post_run(&p); return 1; }
     slot_t *s = &g_slot[g_cur];
-    post_t *d = postq_push(&s->posts, reserved && reserved == s->take_seq);
-    if (!d) { VKRED("no memory for a completion effect (kind %d): not applied", p.kind); return 0; }
+    post_t *d = postq_push_must(&s->posts, reserved && reserved == s->take_seq, post_fatal);
     *d = p; atomic_fetch_add(&g_posted, 1); return 1;
 }
 static void post_add(post_t p) { post_add_(p, 0); }

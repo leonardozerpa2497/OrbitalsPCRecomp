@@ -192,6 +192,34 @@ static void test_postq(void) {
     free(q.v);
 }
 
+// A full queue with no memory (the review's case: 16 effects in 16 entries, then a landing and an event): postq_push_must calls its failure before
+// adding anything, for an ordinary post and for a reserved token of another submission (posted as ordinary). vk_submit.c's failure ends the run,
+// so a submission missing an effect never completes; here the hook returns and the queue must still hold exactly the 16 earlier effects
+typedef struct { int kind; uint32_t v; } t_post;
+static int g_fatal; static size_t g_fatal_n;
+static void t_fatal(const postq_t *q) { g_fatal++; g_fatal_n = q->n; }
+static void test_postq_full_nomem(void) {
+    postq_t q = {0}; q.esz = sizeof(t_post);
+    for (uint32_t i = 0; i < 16; i++) { t_post *d = postq_push_must(&q, 0, t_fatal); CHECK(d != NULL); if (d) *d = (t_post){1, 1}; }
+    CHECK(g_fatal == 0 && q.n == 16 && q.cap == 16 && q.reserved == 0);   // capacity filled exactly: the next ordinary post must grow
+    g_fail_realloc = 1;
+    t_post *land = postq_push_must(&q, 0, t_fatal);                      // the landing (vks_post_fn)
+    CHECK(land == NULL && g_fatal == 1 && g_fatal_n == 16 && q.n == 16);
+    t_post *mism = postq_push_must(&q, 0, t_fatal);                      // a reserved token of another submission posts as ordinary: same
+    CHECK(mism == NULL && g_fatal == 2 && q.n == 16);
+    for (size_t i = 0; i < q.n; i++) CHECK(((t_post *)q.v)[i].kind == 1 && ((t_post *)q.v)[i].v == 1);   // nothing partial, nothing overwritten
+    g_fail_realloc = 0;
+    // with room reserved before the queue filled, the reserved post needs no memory and never fails
+    postq_reset(&q); CHECK(postq_reserve(&q));
+    for (int i = 0; i < 15; i++) CHECK(postq_push_must(&q, 0, t_fatal) != NULL);
+    CHECK(q.n + q.reserved == q.cap);
+    g_fail_realloc = 1; g_fatal = 0;
+    CHECK(postq_push_must(&q, 1, t_fatal) != NULL && g_fatal == 0 && q.n == 16 && q.reserved == 0);
+    CHECK(postq_push_must(&q, 0, t_fatal) == NULL && g_fatal == 1 && q.n == 16);
+    g_fail_realloc = 0;
+    free(q.v);
+}
+
 static void test_take(void) {
     wring_t r; ring_init(&r, 4096); uint64_t at;
     CHECK(!wring_take(&r, 1025, 16, &at));                       // more than a quarter
@@ -214,6 +242,7 @@ int main(void) {
     printf("transactional plans\n"); test_transactional();
     printf("prepare with no memory\n"); test_prepare();
     printf("post room\n"); test_postq();
+    printf("full post queue with no memory\n"); test_postq_full_nomem();
     printf("random mixed batches\n"); test_random(1); test_random(0);
     printf(g_failures ? "FAILED: %d\n" : "OK\n", g_failures);
     return g_failures != 0;

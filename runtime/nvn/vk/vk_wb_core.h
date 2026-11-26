@@ -128,4 +128,12 @@ static inline void *postq_push(postq_t *q, int reserved) {
     else if (!postq_room(q, 1)) return NULL;
     return (char *)q->v + q->n++ * q->esz;
 }
+// The next entry or never: an effect with no room must not let its submission complete without it (its event, counter or landing silently lost while
+// the submission's value is published). fail reports and ends the run; it is called before anything is added and must not return (a host test's
+// hook may: NULL then, with the queue unchanged)
+static inline void *postq_push_must(postq_t *q, int reserved, void (*fail)(const postq_t *q)) {
+    void *d = postq_push(q, reserved);
+    if (!d) fail(q);
+    return d;
+}
 static inline void postq_reset(postq_t *q) { q->n = 0; q->reserved = 0; }
