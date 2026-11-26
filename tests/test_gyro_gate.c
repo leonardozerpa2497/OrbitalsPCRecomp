@@ -108,7 +108,7 @@ static void reset(void){
   add_calls = orig_calls = engine_drops = abort_countdown = settle_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
   watch_lo = watch_hi = 0; watch_hits = 0;
   G.mode = 1; G.sens_x = G.sens_y = 1.5f; G.tightening = 3; G.invert = 0; G.test = 0; G.log = 0; G.button = 20; G.button_toggle = 0;
-  G.test_delay = 0;
+  G.test_delay = 0; G.latest = 0;
   clock_ns = 5000000000000ull;
   make_classes(); make_world(); make_pc(0, 0); make_pc(1, 1);
 }
@@ -421,12 +421,12 @@ static void test_delay_parsing(void){
     { "15", 15 }, { "garbage", 15 }, { "", 15 }, { "  ", 15 }, { "0junk", 15 }, { "110s", 15 },
     { "-1", 15 }, { "600.5", 15 }, { "nan", 15 }, { "inf", 15 }, { "1e9", 15 }, { "600", 600 }, { "2.5", 2.5f }, { " 110 \t", 110 }, { "0", 0 },
   };
-  G.test_delay = 0;
+  G.test_delay = 0; G.latest = 0;
   for(size_t i = 0; i < sizeof cases / sizeof cases[0]; i++){
     orbitals_input_ini("gyro_test_delay", cases[i].v);
     CHECK(G.test_delay == cases[i].want, "gyro_test_delay=%s gave %g, want %g", cases[i].v, G.test_delay, cases[i].want);
   }
-  G.test_delay = 0;
+  G.test_delay = 0; G.latest = 0;
 }
 static int count_logged(const char* s){ int n = 0; for(const char* p = logbuf; (p = strstr(p, s)); p++) n++; return n; }
 /* the PC case: the gate opens during loading, a 208 ms UpdateRotation hitch follows; with a 10 s delay from arming the test waits
@@ -617,6 +617,46 @@ static void test_settle_after_clock_snapshot(void){
   CHECK(T.state==4 && logged("-> PASS"), "settling did not finish after consuming pending motion:\n%s", logbuf);
 }
 
+/* Reproduce the Edge's bursts: three 16 ms sensor samples arrive together every third camera tick.
+   Camera ticks must receive an even angular step, not alternating empty frames and triple steps. */
+static void test_latest_delivery(void){
+  reset(); G.latest=1; G.sens_x=G.sens_y=1; G.tightening=0;
+  u64 sensor=1000000000ull;
+  for(int f=0;f<210;f++){
+    clock_ns+=16000000ull;
+    if(f%3==0){
+      PadMotion m[3];
+      for(int j=0;j<3;j++){ sensor+=16000000ull; m[j]=(PadMotion){sensor,{0,(float)(90/RAD2DEG),0},{0,9.80665f,0}}; }
+      orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,m,3,1,1);
+    }
+    double before=cam_yaw(0); tick(0,.016f);
+    if(f>3) CHECK(NEAR(cam_yaw(0)-before,-1.44,.001),"uneven frame %d: %.6f",f,cam_yaw(0)-before);
+  }
+  double before=cam_yaw(0);
+  /* A held touchpad cancels the stored velocity even with no new sensor packet. */
+  orbitals_gyro_pad(0,100,0x054c,0x0df2,1u<<20,0,NULL,0,1,1);
+  clock_ns+=16000000ull; tick(0,.016f);
+  CHECK(cam_yaw(0)==before,"hold leaked a rate");
+  G.button_toggle=1; P[0].button_was=0;
+  orbitals_gyro_pad(0,100,0x054c,0x0df2,1u<<20,0,NULL,0,1,1);
+  PadMotion m={sensor+16000000ull,{0,1,0},{0,9.80665f,0}};
+  orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,&m,1,1,1);
+  clock_ns+=16000000ull; tick(0,.016f);
+  CHECK(cam_yaw(0)==before,"toggle off leaked a rate");
+  P[0].toggled_off=0;
+  m.t_ns+=16000000ull;orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,&m,1,1,1);
+  clock_ns+=60000000ull;tick(0,.016f);
+  CHECK(cam_yaw(0)==before,"stale rate moved camera");
+  m.t_ns+=16000000ull;orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,&m,1,1,1);
+  *GP(GSTATE+GS_PAUSED)=1;clock_ns+=16000000ull;tick(0,.016f);
+  *GP(GSTATE+GS_PAUSED)=0;clock_ns+=16000000ull;tick(0,.016f);
+  CHECK(cam_yaw(0)==before,"pause/resume reused velocity");
+  m.t_ns+=16000000ull;orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,&m,1,1,1);
+  orbitals_gyro_pad(0,101,0x054c,0x0df2,0,0,NULL,0,1,1);
+  clock_ns+=16000000ull;tick(0,.016f);
+  CHECK(cam_yaw(0)==before,"new device inherited velocity");
+}
+
 int main(void){
   g_mem = calloc(1, MEM);
   static GuestFn disp[64]; g_disp = disp;
@@ -705,6 +745,7 @@ int main(void){
   test_end_inside_last_due_sample();
   test_end_after_publication_clears_it();
   test_settle_after_clock_snapshot();
+  test_latest_delivery();
   test_delay_parsing();
   test_delay_holds_start_until_delay();
   test_delay_keeps_gate_and_ends();

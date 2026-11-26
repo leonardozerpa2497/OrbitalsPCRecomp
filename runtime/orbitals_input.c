@@ -205,7 +205,8 @@ static struct {
   int test;            /* 1 = synthetic gyro test once a player can look */
   int log;             /* 1 = once a second per pad: raw mean / spread, bias, drift after calibration */
   float test_delay;    /* gyro_test only: seconds from arming before the test may start (past loading hitches), 0-600 */
-} G={0,1.5f,1.5f,20,0,3.0f,0,0,0,0,0.0f};
+  int latest;          /* opt-in: integrate the latest real-pad angular velocity on the camera clock */
+} G={0,1.5f,1.5f,20,0,3.0f,0,0,0,0,0.0f,0};
 
 void orbitals_input_ini(const char* k, const char* v){
   if(!strcmp(k,"button_layout")){ g_layout= !strcmp(v,"xbox")? 1 : !strcmp(v,"playstation")? 2 : 0; }
@@ -225,6 +226,7 @@ void orbitals_input_ini(const char* k, const char* v){
     if(end!=v && !end[strspn(end," \t\r\n")]){ if(f>=0 && f<=600) G.test_delay=f; }
   }
   else if(!strcmp(k,"gyro_log")) G.log=atoi(v)==1;
+  else if(!strcmp(k,"gyro_delivery")) G.latest=!strcmp(v,"latest");
 }
 int orbitals_gyro_wanted(void){ return G.mode || G.test || G.calibrate || G.log; }
 
@@ -243,10 +245,10 @@ typedef struct {
 static GyroPad P[SLOTS];
 
 /* the turn waiting for the player's next UpdateRotation, degrees; written by the frontend thread, taken by the game thread */
-static struct { int lock; double yaw, pitch; u64 taken_ns; } Acc[SLOTS];
+static struct { int lock; double yaw, pitch; u64 taken_ns; double rate_yaw, rate_pitch; u64 rate_ns; } Acc[SLOTS];
 static void acc_lock(int s){ while(__atomic_exchange_n(&Acc[s].lock,1,__ATOMIC_ACQUIRE)) {} }
 static void acc_unlock(int s){ __atomic_store_n(&Acc[s].lock,0,__ATOMIC_RELEASE); }
-static void acc_clear(int s){ acc_lock(s); Acc[s].yaw=Acc[s].pitch=0; acc_unlock(s); }
+static void acc_clear(int s){ acc_lock(s); Acc[s].yaw=Acc[s].pitch=0; Acc[s].rate_ns=0; acc_unlock(s); }
 
 /* The launcher creates a new executable directory each run, with data/save a junction to the profile's save directory. That
    directory only holds the game's own save kinds (export, backup and restore refuse anything else, and a restore replaces it), so
@@ -423,7 +425,12 @@ static void gyro_sample(int s, GyroPad* g, const PadMotion* m, int synthetic, in
   if(G.invert&1) dyaw=-dyaw;
   if(G.invert&2) dpitch=-dpitch;
   u64 now=plat_ns();   /* read before any lock: no clock read ever happens under test_lock or an Acc lock */
-  if(!synthetic){ acc_add(s,now,dyaw,dpitch); return; }
+  if(!synthetic){
+    if(G.latest && !G.test){
+      acc_lock(s); Acc[s].rate_yaw=dyaw/dt; Acc[s].rate_pitch=dpitch/dt; Acc[s].rate_ns=now; acc_unlock(s);
+    } else acc_add(s,now,dyaw,dpitch);
+    return;
+  }
   /* a synthetic sample is counted and published in one test_lock section (lock order test_lock -> Acc, the only nesting), and
      only while the test still runs on this slot: a game-thread end comes either before it (the sample is refused) or after it
      (test_inconclusive clears this Acc under the same lock), so an ended test never leaves a synthetic turn behind */
@@ -471,7 +478,7 @@ void orbitals_gyro_pad(int s, u32 id, u16 vendor, u16 product, u32 buttons, u16 
   test_unlock();
   if(ended) acc_clear(s);   /* the synthetic turn of an ended test never reaches the camera */
   if(testing) return;
-  if(!allowed) acc_clear(s);
+  if(!active) acc_clear(s);   /* pause/toggle/aim gating also invalidates held angular velocity immediately */
   if(!has_gyro) return;
   for(int i=0;i<n;i++){
     gyro_sample(s,g,&m[i],0,active,manual);
@@ -661,7 +668,19 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   }
   test_unlock();
   double yaw=0, pitch=0;
-  acc_lock(id); yaw=Acc[id].yaw; pitch=Acc[id].pitch; Acc[id].yaw=Acc[id].pitch=0; __atomic_store_n(&Acc[id].taken_ns,now,__ATOMIC_RELAXED); acc_unlock(id);
+  acc_lock(id);
+  yaw=Acc[id].yaw; pitch=Acc[id].pitch; Acc[id].yaw=Acc[id].pitch=0;
+  /* The real sensor rate is held between packets, not its batched integral. Use elapsed wall time between camera ticks,
+     never catch up after a gap, and expire the rate after 50 ms without a new sample. Synthetic tests retain their exact
+     sampled integral and never mix in a held real-pad rate. Gate closure invalidates it before the next open frame. */
+  u64 taken=__atomic_load_n(&Acc[id].taken_ns,__ATOMIC_RELAXED);
+  if(G.latest && !G.test && open && !gap && !ended && taken && now>taken && now-taken<=50000000ull && Acc[id].rate_ns
+     && (now<Acc[id].rate_ns || now-Acc[id].rate_ns<=50000000ull)){
+    double elapsed=(now-taken)/1e9;
+    yaw+=Acc[id].rate_yaw*elapsed; pitch+=Acc[id].rate_pitch*elapsed;
+  }
+  if(!open || gap || ended) Acc[id].rate_ns=0;
+  __atomic_store_n(&Acc[id].taken_ns,now,__ATOMIC_RELAXED); acc_unlock(id);
   if(!open || gap || ended){   /* dropped, never kept for later (nor the synthetic turn of an ended test) */
     if(G.log && (yaw || pitch)){
       if(!Gs[id].drop_t0) Gs[id].drop_t0=now;

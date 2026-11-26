@@ -212,7 +212,8 @@ static void motion_poll(void){
   }
   for(int i=0;i<WIN_GAMEPAD_SLOTS;i++){
     SDL_Gamepad* pad=sdl_slots[i].handle;
-    if(!pad || motion[i].sensors!=1 || (motion[i].events && now-motion[i].last_event_ns<500000000ull)) continue;
+    if(!pad || motion[i].sensors!=1 || motion[i].events) continue;
+    /* Once events have worked, silence means stale data; do not resurrect a cached rate with a fresh host timestamp. */
     float g[3];
     sdl.GetGamepadSensorData(pad,SDL_ACCEL,motion[i].accel,3);
     if(sdl.GetGamepadSensorData(pad,SDL_GYRO,g,3)) motion_push(i,now,g);
