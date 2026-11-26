@@ -148,9 +148,11 @@ static void ei_install(const SwrModInfo* mod){
 
 /* ===================================================================== gyro aiming
    The camera turns in the engine, by the angle the controller turned (no simulated stick): APlayerController::UpdateRotation, called
-   by every local player controller once a frame while it has a pawn to look with, first gets the gyro turn through the engine's own
-   AddYawInput / AddPitchInput. Those respect IgnoreLookInput (cutscenes, menus that lock the camera), then the frame turns by
-   RotationInput as for the stick, which keeps working at the same time. Nothing is added while the game is paused (DeltaTime 0).
+   by every local player controller once a frame (also without a pawn, at the title and in menus), first gets the gyro turn through
+   the engine's own AddYawInput / AddPitchInput, then the frame turns by RotationInput as for the stick, which keeps working at the
+   same time. A gate (gyro_gate) lets it through only while the controller looks through its own acknowledged pawn with look input
+   not ignored; otherwise the turn is dropped. While the game is paused UpdateRotation does not run; the turn from before a pause is
+   dropped, so nothing jumps after it.
    Samples: every SDL sensor sample of the pad, integrated with its own timestamp (frame rate independent); player space yaw (GyroWiki,
    relax factor 1.41) from the gravity the accelerometer sees; tightening under gyro_tightening deg/s; automatic calibration when the pad
    lies still for 1.5 s (spread < 0.02 rad/s) and a manual one (gyro_calibrate=1, or holding the gyro button 3 s with the pad lying
@@ -324,7 +326,7 @@ static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_
    through the same processing as the pad's samples (pad samples are left out meanwhile) */
 static struct {
   int state;            /* 0 idle, 1 waiting for a player that can look, 2 running, 3 settling, 4 done */
-  int slot; u64 t0, next_sample, seen_ns;
+  int slot; u64 pc, t0, next_sample, seen_ns;   /* pc: the player controller under test */
   double want_yaw, want_pitch;          /* integral x sensitivity, camera degrees (UE signs) */
   double applied_yaw, applied_pitch;    /* given to AddYawInput / AddPitchInput */
   double cam_yaw, cam_pitch;            /* ControlRotation change measured around UpdateRotation */
@@ -447,43 +449,109 @@ static int pc_controller_id(u64 pc){
 }
 static double wrap180(double d){ while(d>180) d-=360; while(d<-180) d+=360; return d; }
 
+/* The gate: the gyro turns a player controller only while it is plainly looking through its own pawn. UpdateRotation also runs
+   without one (PlayerTick calls it while the controller is Inactive: the title and menus), so its call alone proves nothing. Read
+   before the game's UpdateRotation runs, only from the controller and its camera manager (the pawn and view target are compared as
+   pointers, never read): a pawn (an untagged pointer) that the controller acknowledged, look input not ignored, a camera manager
+   whose view target is that pawn and that is not blending to another actor, and a frame that moves (DeltaTime > 0). Anything
+   unreadable closes it. A closed gate still takes the turn waiting for the player and drops it, so nothing builds up meanwhile. */
+enum { PC_PAWN=0x2e8, PC_IGNORE_LOOK=0x33a, PC_ACK_PAWN=0x358, PC_CAMERA_MANAGER=0x368, PCM_VIEW_TARGET=0x340, PCM_PENDING_VIEW_TARGET=0xc00 };
+enum { GATE_OPEN, GATE_UNREADABLE, GATE_NO_PAWN, GATE_TAGGED, GATE_NOT_ACKNOWLEDGED, GATE_IGNORE_LOOK, GATE_NO_CAMERA,
+       GATE_VIEW_TARGET, GATE_PENDING_VIEW_TARGET, GATE_NO_TIME };
+static const char* const gate_reason[]={"open","controller unreadable","no pawn","tagged pawn pointer","pawn not acknowledged",
+  "look input ignored","camera manager missing or unreadable","view target is not the pawn","blending to another view target",
+  "DeltaTime 0"};
+typedef struct { u64 pawn, ack, pcm, vt, pending; int ignore; } GateSeen;
+static int gyro_gate(u64 pc, float dt, GateSeen* q){
+  memset(q,0,sizeof *q);
+  if(!guest_span_readable(pc+PC_PAWN,8,8) || !guest_span_readable(pc+PC_IGNORE_LOOK,1,1) || !guest_span_readable(pc+PC_ACK_PAWN,8,8)
+     || !guest_span_readable(pc+PC_CAMERA_MANAGER,8,8)) return GATE_UNREADABLE;
+  q->pawn=gr64(pc+PC_PAWN); q->ack=gr64(pc+PC_ACK_PAWN); q->ignore=*GP(pc+PC_IGNORE_LOOK); q->pcm=gr64(pc+PC_CAMERA_MANAGER);
+  int pcm_ok= q->pcm && !(q->pcm&1) && guest_span_readable(q->pcm+PCM_VIEW_TARGET,8,8) && guest_span_readable(q->pcm+PCM_PENDING_VIEW_TARGET,8,8);
+  if(pcm_ok){ q->vt=gr64(q->pcm+PCM_VIEW_TARGET); q->pending=gr64(q->pcm+PCM_PENDING_VIEW_TARGET); }
+  if(!q->pawn) return GATE_NO_PAWN;
+  if(q->pawn&1) return GATE_TAGGED;
+  if(q->ack!=q->pawn) return GATE_NOT_ACKNOWLEDGED;
+  if(q->ignore) return GATE_IGNORE_LOOK;
+  if(!pcm_ok) return GATE_NO_CAMERA;
+  if(q->vt!=q->pawn) return GATE_VIEW_TARGET;
+  if(q->pending && q->pending!=q->pawn) return GATE_PENDING_VIEW_TARGET;
+  if(!(dt>0)) return GATE_NO_TIME;
+  return GATE_OPEN;
+}
+/* per player, game thread only: the gate seen last, the previous UpdateRotation and (gyro_log) the turn dropped while closed */
+static struct { u64 pc; int reason, logged; u64 last_ns, drop_t0; double drop_yaw, drop_pitch; } Gs[SLOTS];
+
+static void test_inconclusive(const char* why){   /* under test_lock */
+  T.state=4; LOG("gyro test: INCONCLUSIVE (%s); no result\n",why);
+}
+
 static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   u64 pc=c->x[0]; float dt=c->v[0].f[0];
   int id= (G.mode || T.state)? pc_controller_id(pc) : -1;
-  if(id>=0 && id<SLOTS){
-    static u64 seen[SLOTS];
-    if(seen[id]!=pc){ seen[id]=pc; LOG("gyro: player controller %llx has ControllerId %d\n",(unsigned long long)pc,id); }
-    test_lock();
-    if(T.state==1 && (G.mode==0 || id==T.slot)){ u64 now=plat_ns(); if(!T.seen_ns) T.seen_ns=now; else if(now-T.seen_ns>3000000000ull){ T.slot=id; T.state=2; LOG("gyro test: start on ControllerId %d\n",id); } }
-    int measure= T.slot==id && (T.state==2 || T.state==3);
-    test_unlock();
-    double yaw=0, pitch=0;
-    acc_lock(id); yaw=Acc[id].yaw; pitch=Acc[id].pitch; Acc[id].yaw=Acc[id].pitch=0; __atomic_store_n(&Acc[id].taken_ns,plat_ns(),__ATOMIC_RELAXED); acc_unlock(id);
-    double cp0=0, cy0=0;
-    if(measure){ cp0=*(double*)GP(pc+PC_CONTROL_ROTATION); cy0=*(double*)GP(pc+PC_CONTROL_ROTATION+8); }
-    if(dt>0 && (yaw || pitch)){
-      u64 x0=c->x[0]; V128 v0=c->v[0];
-      if(yaw) guest_call_float(c,g_add_yaw,pc,(float)yaw);
-      if(pitch) guest_call_float(c,g_add_pitch,pc,(float)pitch);
-      c->x[0]=x0; c->v[0]=v0;
-      if(measure){ test_lock(); T.applied_yaw+=yaw; T.applied_pitch+=pitch; test_unlock(); }
+  if(id<0 || id>=SLOTS){ orig(c,entry); return; }
+  static u64 seen[SLOTS];
+  if(seen[id]!=pc){ seen[id]=pc; LOG("gyro: player controller %llx has ControllerId %d\n",(unsigned long long)pc,id); }
+  GateSeen q; int reason=gyro_gate(pc,dt,&q), open= reason==GATE_OPEN;
+  u64 now=plat_ns();
+  if(G.log && (!Gs[id].logged || Gs[id].pc!=pc || Gs[id].reason!=reason))
+    LOG("gyro gate: P%d controller %llx %s (%s): pawn %llx acknowledged %llx view target %llx pending %llx ignore look %d dt %.4f\n",
+        id+1,(unsigned long long)pc,open? "open" : "closed",gate_reason[reason],(unsigned long long)q.pawn,(unsigned long long)q.ack,
+        (unsigned long long)q.vt,(unsigned long long)q.pending,q.ignore,dt);
+  /* UpdateRotation stops while the game is paused (the paused tick skips PlayerTick): the turn waiting from before such a gap is
+     dropped, as gyro_sample already drops one nobody took for 100 ms */
+  int gap= Gs[id].last_ns && now-Gs[id].last_ns>100000000ull;
+  if(G.log && Gs[id].last_ns && now-Gs[id].last_ns>200000000ull) LOG("gyro gate: P%d UpdateRotation again after %.0f ms\n",id+1,(now-Gs[id].last_ns)/1e6);
+  Gs[id].pc=pc; Gs[id].reason=reason; Gs[id].logged=1; Gs[id].last_ns=now;
+  test_lock();
+  if(T.state==1 && (G.mode==0 || id==T.slot)){   /* starts after 3 s of an open gate without a break */
+    if(!open) T.seen_ns=0;
+    else if(!T.seen_ns) T.seen_ns=now;
+    else if(now-T.seen_ns>3000000000ull){ T.slot=id; T.pc=pc; T.state=2; LOG("gyro test: start on ControllerId %d\n",id); }
+  }
+  int measure= T.slot==id && (T.state==2 || T.state==3);
+  if(measure){
+    if(pc!=T.pc){ test_inconclusive("another player controller took this player"); measure=0; }
+    else if(!open){ char why[96]; snprintf(why,sizeof why,"the gate closed during the test: %s",gate_reason[reason]); test_inconclusive(why); measure=0; }
+    else if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)){ test_inconclusive("ControlRotation unreadable"); measure=0; }
+  }
+  test_unlock();
+  double yaw=0, pitch=0;
+  acc_lock(id); yaw=Acc[id].yaw; pitch=Acc[id].pitch; Acc[id].yaw=Acc[id].pitch=0; __atomic_store_n(&Acc[id].taken_ns,now,__ATOMIC_RELAXED); acc_unlock(id);
+  if(!open || gap){   /* dropped, never kept for later */
+    if(G.log && (yaw || pitch)){
+      if(!Gs[id].drop_t0) Gs[id].drop_t0=now;
+      Gs[id].drop_yaw+=fabs(yaw); Gs[id].drop_pitch+=fabs(pitch);
     }
-    orig(c,entry);
-    if(measure){
-      double dp=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION)-cp0), dy=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION+8)-cy0);
-      test_lock();
-      T.cam_pitch+=dp; T.cam_yaw+=dy;
-      if(T.state==3 && plat_ns()-T.t0>300000000ull){
-        T.state=4;
-        double ey= T.want_yaw? 100.0*(T.cam_yaw-T.want_yaw)/T.want_yaw : 0, ep= T.want_pitch? 100.0*(T.cam_pitch-T.want_pitch)/T.want_pitch : 0;
-        LOG("gyro test: yaw integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_yaw,T.applied_yaw,T.cam_yaw,ey,fabs(ey)<=2? "PASS" : "FAIL");
-        LOG("gyro test: pitch integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_pitch,T.applied_pitch,T.cam_pitch,ep,fabs(ep)<=2? "PASS" : "FAIL");
-      }
-      test_unlock();
-    }
-    return;
+    yaw=pitch=0;
+  }
+  if(G.log && Gs[id].drop_t0 && now-Gs[id].drop_t0>=1000000000ull){
+    LOG("gyro gate: P%d dropped %.3f deg yaw, %.3f deg pitch in %.1f s (%s)\n",id+1,Gs[id].drop_yaw,Gs[id].drop_pitch,(now-Gs[id].drop_t0)/1e9,gate_reason[reason]);
+    Gs[id].drop_t0=0; Gs[id].drop_yaw=Gs[id].drop_pitch=0;
+  }
+  double cp0=0, cy0=0;
+  if(measure){ cp0=*(double*)GP(pc+PC_CONTROL_ROTATION); cy0=*(double*)GP(pc+PC_CONTROL_ROTATION+8); }
+  if(yaw || pitch){
+    u64 x0=c->x[0]; V128 v0=c->v[0];
+    if(yaw) guest_call_float(c,g_add_yaw,pc,(float)yaw);
+    if(pitch) guest_call_float(c,g_add_pitch,pc,(float)pitch);
+    c->x[0]=x0; c->v[0]=v0;
+    if(measure){ test_lock(); T.applied_yaw+=yaw; T.applied_pitch+=pitch; test_unlock(); }
   }
   orig(c,entry);
+  if(!measure) return;
+  test_lock();
+  if(T.state!=2 && T.state!=3){ test_unlock(); return; }   /* ended inside (a nested UpdateRotation) */
+  if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)){ test_inconclusive("ControlRotation unreadable after UpdateRotation"); test_unlock(); return; }
+  double dp=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION)-cp0), dy=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION+8)-cy0);
+  T.cam_pitch+=dp; T.cam_yaw+=dy;
+  if(T.state==3 && plat_ns()-T.t0>300000000ull){
+    T.state=4;
+    double ey= T.want_yaw? 100.0*(T.cam_yaw-T.want_yaw)/T.want_yaw : 0, ep= T.want_pitch? 100.0*(T.cam_pitch-T.want_pitch)/T.want_pitch : 0;
+    LOG("gyro test: yaw integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_yaw,T.applied_yaw,T.cam_yaw,ey,fabs(ey)<=2? "PASS" : "FAIL");
+    LOG("gyro test: pitch integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_pitch,T.applied_pitch,T.cam_pitch,ep,fabs(ep)<=2? "PASS" : "FAIL");
+  }
+  test_unlock();
 }
 static void update_rotation_base(CPU* c, u64 entry){ update_rotation(c,entry,rot_orig); }
 static void update_rotation_sub(CPU* c, u64 entry){ update_rotation(c,entry,rot_sub_orig); }

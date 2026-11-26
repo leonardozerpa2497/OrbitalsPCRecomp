@@ -29,8 +29,21 @@ until it is moved out.
 ## How it turns the camera
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
-  stick ends in. They respect IgnoreLookInput (cutscenes) and the frame applies it like stick input; the stick keeps working.
-  Nothing is applied while the game is paused (DeltaTime 0), the game window is not focused or the PC settings panel is open.
+  stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
+  not focused or the PC settings panel is open.
+- Gate (`gyro_gate`): UpdateRotation alone proves nothing, because `PlayerTick` (main+0x3201750) calls it also while the controller
+  is Inactive without a pawn (the title: this is why the earlier synthetic test turned a title ControlRotation). The turn goes
+  through only when, read from the controller before the game's UpdateRotation (offline RE of main): Pawn (+0x2e8) is set and an
+  untagged pointer (low bit clear), AcknowledgedPawn (+0x358) is the same pawn, the IgnoreLookInput counter (byte +0x33a; the
+  virtual at vtable+0x8d8, main+0x2c9d810, returns it != 0) is 0, the PlayerCameraManager (+0x368) is readable, its
+  ViewTarget.Target (+0x340) is the pawn and its PendingViewTarget.Target (+0xc00) is empty or the pawn, and DeltaTime > 0. The
+  pawn and view target are compared as pointers, never read; anything unreadable closes the gate. A closed gate still takes the
+  waiting turn and drops it, so nothing builds up in menus, cinematics or the title. Conservative: that gameplay has the view
+  target equal to the pawn is NOT OBSERVED yet; `gyro_log=1` prints every gate change with the raw pointers.
+- Pause: the paused world tick (TickActor main+0x3208eb0, paused path +0x3209130) zeroes RotationInput and usually does not call
+  PlayerTick, so UpdateRotation does not run at all (the earlier note "DeltaTime 0" was wrong). A turn nobody took for 100 ms is
+  dropped when the next sample arrives, and a turn waiting when UpdateRotation comes back after more than 100 ms is dropped too, so
+  nothing jumps after a pause (the second rule removes the one sample the first one leaves). A DeltaTime 0 call closes the gate.
 - Per player: pad slot n turns the player controller whose LocalPlayer ControllerId is n (player 1 = 0; logged as
   `gyro: player controller ... has ControllerId n`). Every pad with a gyro aims its own player (both DualSenses in co-op).
 - Samples: every SDL sensor event with its own timestamp (frame-rate independent); player-space yaw (GyroWiki, relax 1.41) from
@@ -50,13 +63,23 @@ until it is moved out.
   dangling save link storing nothing, the host-clock to sensor-clock rollback, and the forward jump when polling takes over (the
   earlier build calibrated 0.24 s after the events stopped). The earlier build fails five of them. Linux: 8/8 pass; Windows: run by
   the PC gate.
+- Gate tests (`python tests/test_gyro_gate.py`, C in `tests/test_gyro_gate.c`): the real `orbitals_gyro_pad` and hooked
+  UpdateRotation on fake guest controllers with small engine stand-ins. Each closed case (title without a pawn, pending view target
+  another actor, IgnoreLookInput, camera manager or controller field unreadable, tagged pawn pointer, pawn not acknowledged,
+  viewing another pawn, no camera manager) turns nothing for 1.1 s of a 90 deg/s turn, still runs the game's UpdateRotation, logs
+  the closed gate and the dropped turn, and opening it causes no jump; both players turn their own camera at once; no jump after a
+  2 s pause or DeltaTime 0 frames; the synthetic test starts only after 3 s of an unbroken open gate and passes, ends
+  INCONCLUSIVE (never PASS) when the gate closes mid-test, and FAILs when the engine drops the input. Mutations (gate always open,
+  closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE) each fail at least one test.
+- Synthetic test and the gate: it starts only after 3 s of continuous open gate (the 3 s start over whenever it closes); if the
+  gate closes or another controller takes the player while it runs, it logs `gyro test: INCONCLUSIVE (...)` and gives no result.
 - Real pad still 60 s (`gyro_log=1`): resumed after the owner connected the pad; logs and final measured drift are recorded
   in the run report. Initial run exposed the clock rollback above; its uncalibrated P1 zero-drift lines are not a pass.
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
 
 ## Not verified
-- In menus the main menu's player controller also runs UpdateRotation (the synthetic test turned its ControlRotation): the menu
-  uses its own camera, so no visible effect is expected, but this was not observed with a real pad.
+- The gate in the real game: NOT OBSERVED. That it opens in gameplay (view target = pawn) and stays closed at the title, menus and
+  cinematics must be checked on the PC with `gyro_log=1` (`gyro gate:` lines) and the synthetic test in gameplay.
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
   if it is the other way.
 - Steam Input / DS5Bridge can take the pad's sensors before SDL; the log line `gyro: P1 ... has a gyro` confirms SDL sees them.
