@@ -3,7 +3,7 @@
 Ini keys (Orbitals.ini, launcher Controls page): `button_layout=nintendo|xbox|playstation`, `button_accept_bottom=0|1`.
 Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming PC on 2026-11-26.
 
-## Icons (PlayStation and Xbox observed; performance comparison pending)
+## Icons (PlayStation and Xbox observed; paired performance gate completed)
 The regenerated module and reviewed runtime were installed at 09:24. Run `controls-native-gate-ps` shows Cross for Select in the
 main menu, R2 for both players' co-op prompts, Square for the second player's action and Circle for Back in pause. The bounded
 trace records actual replacement textures from caller main+40c4ed4. Screenshots are in `/tmp/claude-1000/orb/controls-native-gate-ps-*_s.png`.
@@ -12,7 +12,8 @@ Run `controls-native-gate-xbox` shows RT for both co-op players and X for player
 returns with the right face button (B), then opens pause again and selects Resume with the bottom face button (A).
 The corresponding `-coop`, `-paused`, `-back-result` and `-resumed` screenshots were inspected.
 `xbox-settings-clean_s.png` is actually the main menu with A Select: the timed navigation ran during a transition.
-It is not Settings evidence. Xbox Settings and the final Nintendo/PlayStation performance comparison remain pending.
+It is not Settings evidence. Xbox Settings remains pending. The eight-run Nintendo/PlayStation comparison and installed
+Windows launcher evidence are recorded in [LAYOUT_BENCH.md](LAYOUT_BENCH.md); no consistent FPS regression was measured.
 
 Before this fix, the 08:30-08:44 PC runs with PlayStation selected showed Nintendo B/A in title, main menu, lobby and settings, and ZR/Y in co-op.
 The regenerated module exports the dynamic lookup and both generated caller chunks use `CALLDYN`, but the opt-in
@@ -89,10 +90,10 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   Game.ini gives the UI the PC contexts. The EKeys initializer hook below also swaps CommonUI's accept/back keys.
   The latest PC run confirms bottom acceptance on title, main menu and lobby, and right-button back from lobby.
   Six redirects are rewritten before use. Selected glyphs now work; full gameplay coverage remains pending.
-  The runtime option is off by default. The reviewed, not-yet-installed launcher ties bottom acceptance to Xbox/PlayStation.
+  The runtime option is off by default. The installed launcher ties bottom acceptance to Xbox/PlayStation.
 
 ## Next steps (not done)
-- Finish Xbox Settings capture and the alternating Nintendo/PlayStation benchmark at both target resolutions.
+- Finish Xbox Settings capture.
   The module has been regenerated, the action-prompt trace and real replacement glyphs observed.
   Validate on-foot jump and remaining gameplay interactions without advancing the fixed benchmark save.
 
