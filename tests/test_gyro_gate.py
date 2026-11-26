@@ -1,5 +1,6 @@
 """Build and run the gyro gate tests (tests/test_gyro_gate.c) against the runtime's real orbitals_input.c, then check that each
-mutation of a key gate rule (controller type, controlled actor, owner, cinematic, shared pause, class metadata checks) fails them."""
+mutation of a key gate rule (controller type, controlled actor, owner, cinematic, shared pause, class metadata checks, synthetic
+test start delay) fails them."""
 import os
 from pathlib import Path
 import shutil
@@ -37,6 +38,11 @@ MUTATIONS = {
                                   "  if(!guest_span_readable(gs+GS_PAUSED,1,1)) return -1;")],
     "no Outer bound": [("for(int n=0;n<GYRO_MAX_OUTERS && !level;n++){", "for(int n=0;!level;n++){ if(n>=GYRO_MAX_OUTERS) n=0;")],
     "first Outer taken as the level": [("    if(is) level=o;", "    if(1) level=o;")],
+    "no gyro_test_delay check": [(" && now>=T.armed_ns+T.delay_ns", "")],
+    "gyro_test_delay counted from the clock origin": [("T.armed_ns=now;", "T.armed_ns=0;")],
+    "gyro_test_delay setting ignored": [("T.delay_ns=(u64)(G.test_delay*1e9);", "T.delay_ns=0;")],
+    "gyro_test_delay not bounded": [("if(f>=0 && f<=600) G.test_delay=f;", "G.test_delay=f;")],
+    "no 3 s unbroken gate before the start": [("Gs[id].open_since && now-Gs[id].open_since>3000000000ull", "Gs[id].open_since")],
 }
 
 

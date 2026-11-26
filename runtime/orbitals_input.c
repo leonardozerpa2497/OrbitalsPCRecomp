@@ -204,7 +204,8 @@ static struct {
   int calibrate;       /* 1 = calibrate at the next still moment and store it */
   int test;            /* 1 = synthetic gyro test once a player can look */
   int log;             /* 1 = once a second per pad: raw mean / spread, bias, drift after calibration */
-} G={0,1.5f,1.5f,20,0,3.0f,0,0,0,0};
+  float test_delay;    /* gyro_test only: seconds from arming before the test may start (past loading hitches), 0-600 */
+} G={0,1.5f,1.5f,20,0,3.0f,0,0,0,0,0.0f};
 
 void orbitals_input_ini(const char* k, const char* v){
   if(!strcmp(k,"button_layout")){ g_layout= !strcmp(v,"xbox")? 1 : !strcmp(v,"playstation")? 2 : 0; }
@@ -219,6 +220,7 @@ void orbitals_input_ini(const char* k, const char* v){
   else if(!strcmp(k,"gyro_invert")) G.invert=atoi(v)&3;
   else if(!strcmp(k,"gyro_calibrate")) G.calibrate=atoi(v)==1;
   else if(!strcmp(k,"gyro_test")) G.test=atoi(v)==1;
+  else if(!strcmp(k,"gyro_test_delay")){ float f=(float)atof(v); if(f>=0 && f<=600) G.test_delay=f; }
   else if(!strcmp(k,"gyro_log")) G.log=atoi(v)==1;
 }
 int orbitals_gyro_wanted(void){ return G.mode || G.test || G.calibrate || G.log; }
@@ -359,6 +361,7 @@ static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_
 static struct {
   int state;            /* 0 idle, 1 waiting for a player that can look, 2 running, 3 settling, 4 done */
   int slot; u64 pc, t0, next_sample;   /* pc: the player controller under test */
+  u64 armed_ns, delay_ns;               /* plat_ns() when armed; it may start only delay_ns after that (gyro_test_delay) */
   double want_yaw, want_pitch;          /* integral x sensitivity, camera degrees (UE signs) */
   double applied_yaw, applied_pitch;    /* given to AddYawInput / AddPitchInput */
   double cam_yaw, cam_pitch;            /* ControlRotation change measured around UpdateRotation */
@@ -366,6 +369,7 @@ static struct {
 } T;   /* shared by the frontend thread (samples) and the game thread (camera): every access under test_lock */
 static void test_lock(void){ while(__atomic_exchange_n(&T.lock,1,__ATOMIC_ACQUIRE)) {} }
 static void test_unlock(void){ __atomic_store_n(&T.lock,0,__ATOMIC_RELEASE); }
+static void test_arm(void){ u64 now=plat_ns(); test_lock(); T.state=1; T.armed_ns=now; T.delay_ns=(u64)(G.test_delay*1e9); test_unlock(); }
 
 static void acc_add(int s, u64 now, double dyaw, double dpitch){
   acc_lock(s);
@@ -639,8 +643,9 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   Gs[id].pc=pc; Gs[id].reason=reason; Gs[id].logged=1; Gs[id].last_ns=now;
   int ended=0;
   test_lock();
-  if(T.state==1 && (G.mode==0 || id==T.slot) && Gs[id].open_since && now-Gs[id].open_since>3000000000ull){   /* 3 s unbroken open gate */
-    T.slot=id; T.pc=pc; T.state=2; LOG("gyro test: start on ControllerId %d\n",id);
+  /* past the gyro_test_delay, then 3 s of unbroken open gate */
+  if(T.state==1 && now>=T.armed_ns+T.delay_ns && (G.mode==0 || id==T.slot) && Gs[id].open_since && now-Gs[id].open_since>3000000000ull){
+    T.slot=id; T.pc=pc; T.state=2; LOG("gyro test: start on ControllerId %d, %.2f s after arming\n",id,(now-T.armed_ns)/1e9);
   }
   int measure= T.slot==id && (T.state==2 || T.state==3);
   if(measure){   /* any break once it runs ends it INCONCLUSIVE, for good */
@@ -712,6 +717,7 @@ void orbitals_input_install(const SwrModInfo* mod){
      || !g_disp[(g_add_yaw-g_code_lo)/4] || !g_disp[(g_add_pitch-g_code_lo)/4]){ LOG("gyro: camera functions not found, gyro unavailable\n"); return; }
   int a=bind(mod,UPDATE_ROTATION,0xd503237fu,update_rotation_base,&rot_orig);
   int b=bind(mod,UPDATE_ROTATION_SUB,0x395cf008u,update_rotation_sub,&rot_sub_orig);
-  if(G.test){ test_lock(); T.state=1; test_unlock(); }
-  LOG("gyro: bound to the camera (UpdateRotation %s, override %s)%s\n",a?"yes":"no",b?"yes":"no",G.test?", synthetic test armed":"");
+  char armed[64]="";
+  if(G.test){ test_arm(); snprintf(armed,sizeof armed,", synthetic test armed (start delay %.1f s)",G.test_delay); }
+  LOG("gyro: bound to the camera (UpdateRotation %s, override %s)%s\n",a?"yes":"no",b?"yes":"no",armed);
 }

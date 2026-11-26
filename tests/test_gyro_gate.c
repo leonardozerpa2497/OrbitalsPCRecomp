@@ -108,6 +108,7 @@ static void reset(void){
   add_calls = orig_calls = engine_drops = abort_countdown = settle_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
   watch_lo = watch_hi = 0; watch_hits = 0;
   G.mode = 1; G.sens_x = G.sens_y = 1.5f; G.tightening = 3; G.invert = 0; G.test = 0; G.log = 0; G.button = 20; G.button_toggle = 0;
+  G.test_delay = 0;
   clock_ns = 5000000000000ull;
   make_classes(); make_world(); make_pc(0, 0); make_pc(1, 1);
 }
@@ -414,6 +415,63 @@ static void test_synthetic_engine_drop_fails(void){
   CHECK(T.state == 4 && logged("-> FAIL") && !logged("-> PASS"), "a camera that did not turn must fail:\n%s", logbuf);
 }
 
+/* gyro_test_delay: parsed only inside 0-600 s, an invalid value keeps the previous one */
+static void test_delay_parsing(void){
+  static const struct { const char* v; float want; } cases[] = {
+    { "15", 15 }, { "-1", 15 }, { "600.5", 15 }, { "nan", 15 }, { "inf", 15 }, { "1e9", 15 }, { "600", 600 }, { "2.5", 2.5f }, { "0", 0 },
+  };
+  G.test_delay = 0;
+  for(size_t i = 0; i < sizeof cases / sizeof cases[0]; i++){
+    orbitals_input_ini("gyro_test_delay", cases[i].v);
+    CHECK(G.test_delay == cases[i].want, "gyro_test_delay=%s gave %g, want %g", cases[i].v, G.test_delay, cases[i].want);
+  }
+  G.test_delay = 0;
+}
+static int count_logged(const char* s){ int n = 0; for(const char* p = logbuf; (p = strstr(p, s)); p++) n++; return n; }
+/* the PC case: the gate opens during loading, a 208 ms UpdateRotation hitch follows; with a 10 s delay from arming the test waits
+   through it and starts at the delay (the 3 s of open gate already met since the hitch), then passes */
+static void test_delay_holds_start_until_delay(void){
+  reset(); G.mode = 1; G.test = 1; G.test_delay = 10; test_arm();
+  u64 armed = clock_ns, due = armed + 10000000000ull;
+  frames(375, 1);   /* 6 s open: the 3 s gate is met, the delay is not */
+  CHECK(T.state == 1, "started %.2f s after arming, before the 10 s delay (state %d)", (clock_ns - armed) / 1e9, T.state);
+  frames(13, 0);    /* a 208 ms UpdateRotation gap */
+  frames(200, 1);   /* 9.41 s: 3.2 s unbroken since the gap */
+  CHECK(T.state == 1 && clock_ns < due, "started before the delay (state %d at %.2f s)", T.state, (clock_ns - armed) / 1e9);
+  while(T.state == 1 && clock_ns < due + 1000000000ull) frame(1, 0.016f);
+  CHECK(T.state == 2 && T.pc == pcs[0] && clock_ns >= due && clock_ns < due + 16000000ull,
+        "the test did not start at the delay (state %d at %.3f s)", T.state, (clock_ns - armed) / 1e9);
+  CHECK(logged("start on ControllerId 0, 10.00 s after arming"), "start log:\n%s", logbuf);
+  frames(200, 1);
+  CHECK(T.state == 4 && logged("-> PASS") && !logged("-> FAIL") && !logged("INCONCLUSIVE"), "delayed test did not pass:\n%s", logbuf);
+  CHECK(NEAR(T.want_yaw, -135, 1.35) && NEAR(T.want_pitch, 45, 0.45), "delayed want %.3f / %.3f", T.want_yaw, T.want_pitch);
+}
+/* past the delay the 3 s unbroken gate still applies, and a delayed test that runs is ended by a gap for good */
+static void test_delay_keeps_gate_and_ends(void){
+  reset(); G.mode = 1; G.test = 1; G.test_delay = 5; test_arm();
+  frames(250, 1);                 /* 4 s open */
+  ignore_close(); frames(70, 1);  /* closed until 5.12 s: the delay passes while closed */
+  ignore_open(); frames(150, 1);  /* 2.4 s open after the delay: not yet */
+  CHECK(T.state == 1, "started past the delay without 3 s of unbroken open gate (state %d)", T.state);
+  frames(50, 1);
+  CHECK(T.state == 2, "did not start after the delay and 3 s open (state %d)", T.state);
+  frames(10, 1); frames(13, 0); frames(5, 1);   /* a 208 ms gap while running */
+  CHECK(T.state == 4 && logged("INCONCLUSIVE") && logged("no UpdateRotation for"), "a gap in a delayed test:\n%s", logbuf);
+  frames(600, 1);
+  CHECK(T.state == 4 && count_logged("gyro test: start") == 1 && !logged("PASS") && !logged("FAIL"), "a delayed test came back:\n%s", logbuf);
+}
+/* the delay is measured from arming (installation), not from when the gate opened: a gate open since before arming still waits */
+static void test_delay_from_arming(void){
+  reset(); G.mode = 1; G.test = 1; G.test_delay = 4;
+  frames(250, 1);   /* 4 s before arming: nothing to start */
+  CHECK(T.state == 0, "a test that was not armed started (state %d)", T.state);
+  test_arm();
+  frames(240, 1);   /* 3.84 s after arming, the gate open 7.84 s */
+  CHECK(T.state == 1, "the delay counted time from before arming (state %d)", T.state);
+  frames(20, 1);
+  CHECK(T.state == 2, "did not start after the delay from arming (state %d)", T.state);
+}
+
 /* review cases: the 3 s window is broken by an UpdateRotation gap and by a new controller, and a test that runs is ended for good
    by a gap or by the game thread while the frontend thread is in a synthetic sample */
 static void test_wait_window_broken_by_pause(void){
@@ -646,6 +704,10 @@ int main(void){
   test_end_inside_last_due_sample();
   test_end_after_publication_clears_it();
   test_settle_after_clock_snapshot();
+  test_delay_parsing();
+  test_delay_holds_start_until_delay();
+  test_delay_keeps_gate_and_ends();
+  test_delay_from_arming();
   printf(failures ? "%d FAILED\n" : "all gyro gate tests passed\n", failures);
   return failures != 0;
 }

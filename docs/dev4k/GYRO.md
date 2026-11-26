@@ -13,6 +13,7 @@ Code: `runtime/orbitals_input.c` (gyro section), `runtime/gamepad_win32.c` (SDL3
 | `gyro_invert` | 0, 1 horizontal, 2 vertical, 3 both | 0 |
 | `gyro_calibrate` | 1 = calibrate at the next 2 s with the pad lying still, stored per controller model, then back to 0 | 0 |
 | `gyro_test` | 1 = synthetic test (below) | 0 |
+| `gyro_test_delay` | with `gyro_test=1` only: seconds from arming (the runtime's install, monotonic clock) before the test may start; 0-600, an invalid value keeps the previous one; ini only, not in the launcher | 0 |
 | `gyro_log` | 1 = once a second per pad: raw mean / spread, bias, drift since calibration | 0 |
 
 Holding the gyro button 3 s with the pad lying still also calibrates and stores it in `gyro_calibration.txt` beside the save
@@ -135,6 +136,15 @@ under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,r
 - Synthetic test and the gate: it starts only after 3 s of continuous open gate on one player's controller (the 3 s start over
   whenever it closes, UpdateRotation stops for over 100 ms or another controller takes the player); once it runs, any such break
   logs `gyro test: INCONCLUSIVE (...)`, gives no result, drops the waiting synthetic turn and cannot be resumed.
+  With `gyro_test_delay=N` it also cannot start before N s after arming (logged as `synthetic test armed (start delay N s)`;
+  the start line says how long after arming it began); both conditions must hold, the 3 s window keeps its own rules and the
+  delay changes nothing else (real gyro, slots, sensitivity, sample path, ends). It exists for player 1: with `gyro=always` P1's
+  gate opened during loading (74.05 s), the test started at 77.05 s and correctly ended INCONCLUSIVE at 77.52 s on a 205 ms
+  UpdateRotation hitch, before the ship scene (91.96 s); a delay past loading lets the test run in gameplay. Gate tests: no start
+  before the delay although the 3 s gate is met and after a 208 ms hitch, start at exactly the delay then PASS; past the delay
+  the 3 s window still applies and a gap ends a running delayed test INCONCLUSIVE with no second start; the delay counts from
+  arming, not from when the gate opened; the parser keeps 0-600 and refuses -1, 600.5, nan, inf, 1e9. Mutations: no delay check,
+  delay counted from the clock origin, setting ignored, no bounds, no 3 s window before the start; each fails.
 - Real pad still 60 s (`gyro_log=1`): resumed after the owner connected the pad; logs and final measured drift are recorded
   in the run report. Initial run exposed the clock rollback above; its uncalibrated P1 zero-drift lines are not a pass.
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
