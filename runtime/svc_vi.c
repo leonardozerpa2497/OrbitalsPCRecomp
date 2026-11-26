@@ -171,6 +171,6 @@ void svc_vi_init(void){
   pm_init(&g_vilock); pc_init(&g_free_cv);
   g_vsync_ev=kevent_new("vsync",0); g_bufavail_ev=kevent_new("buffer",0); kevent_signal(g_bufavail_ev);
   kobj_ref(&g_vsync_ev->o); kobj_ref(&g_bufavail_ev->o);   /* kept by the runtime, see svc_core_init */
-  if(g_opt_docked){ g_width=1920; g_height=1080; }
+  if(g_opt_docked){ g_width= g_opt_display_h? g_opt_display_h*16/9 : 1920; g_height= g_opt_display_h? g_opt_display_h : 1080; }
   svc_register("vi:u",new_vi); svc_register("vi:s",new_vi); svc_register("vi:m",new_vi);
 }

@@ -351,7 +351,7 @@ void frontend_frame(void);
 extern int g_frames;
 extern volatile u64 g_gpu_submits;
 void ini_load(const char* path);
-extern int g_opt_docked, g_opt_lang, g_opt_res, g_opt_fps, g_opt_vsync;
+extern int g_opt_display_h; extern int g_opt_docked, g_opt_lang, g_opt_res, g_opt_fps, g_opt_vsync;
 
 /* ======================================================= hid / vi / nv */
 void hid_update(void);
