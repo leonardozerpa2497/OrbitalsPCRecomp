@@ -7,7 +7,8 @@ The corrected device-local snapshot implementation passed the differential oracl
 [DEVICE_BASELINE_BENCH.md](DEVICE_BASELINE_BENCH.md) records its alternating runs: approximately58 FPS at1800p
 and52 FPS at2160p. Neither meets the requested <1% late-frame target. The old icon scanner has been removed;
 [LAYOUT_BENCH.md](LAYOUT_BENCH.md) records Nintendo/PlayStation comparisons without a consistent FPS regression.
-The actual `r.GTSyncType=0` experiment froze and is rejected; see [SYNC_PROBE.md](SYNC_PROBE.md).
+The actual `r.GTSyncType=0` experiment froze and is rejected. Paired effective mode1 runs reach58.51–58.61 FPS at1800p
+and54.75–54.93 at2160p, improving p95 and late frames outside the mode2 control spread; see [SYNC_PROBE.md](SYNC_PROBE.md).
 [FLIGHT_BENCH.md](FLIGHT_BENCH.md) records eight flight-recorder comparisons: disabling it saves about0.5–0.6 ms CPU
 and adds0.45–0.60 FPS on average. No unmeasured setting is selected from these hypotheses.
 
@@ -42,7 +43,7 @@ animation). On the laptop 2 ms had been measured worse at p95 (vk_replay.c comme
 `env=` in the game's Orbitals.ini. At resume the kit ini did not yet retain this setting; the measurements used temporary
 bench overrides. DEFER=1 confirmed (2.3 ms less translation CPU than DEFER=0).
 
-## Why 4K 60 is not reached (evidence)
+## Initial bottleneck measurements (before device snapshots and sync1)
 - Even 1080p output does not hold 60 (54.6 FPS, half the frames late): a fixed cost per frame in the NVN -> Vulkan replay.
 - The game draws its 3D at the full output size (passes of 3840x2160; the Switch 2 renders 1080p) and the replay's cost grows
   with it on both sides: translation CPU 8.6 ms (1080p) -> 14.4 ms (2160p), GPU 13.9 -> 19.7 ms.
@@ -55,7 +56,7 @@ bench overrides. DEFER=1 confirmed (2.3 ms less translation CPU than DEFER=0).
   execution time. Game threads wait ~18 ms a frame in nvnSyncWait; this includes completion effects and is not by itself proof
   of an avoidable serial stall.
 
-## Resume: icon scanner regression
+## Historical icon scanner regression (removed)
 With the final memory-lock safety patch installed, the old PlayStation scanner severely harms frame pacing. At 1800p,
 same scene/window: PlayStation 36.03/34.37 FPS, p95 64.57/64.55 ms, p99 138.85/163.46 ms; Nintendo 48.30 FPS,
 p95 25.37 ms, p99 29.53 ms. The second PlayStation run had no OpenRGB detection, ruling out that initial explanation.
