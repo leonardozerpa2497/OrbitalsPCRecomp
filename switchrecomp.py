@@ -155,6 +155,8 @@ def gen_module(prog, mods, npdm, outdir, title, chunk_instrs, say):
     L.append('''typedef struct SwrModule { u32 abi; u32 nmods; const SwrModInfo* mods; u32 nentries; const u64* entry_addr; const GuestFn* entry_fn;
   GuestFn interp; u64 code_lo, code_hi; const char* title; u64 title_id; u32 main_stack, main_prio, main_core;
   void (*init)(const RtAPI* rt); u64 (*step)(CPU* c, u32 w, u64 pc); } SwrModule;''')
+    dyn = sorted(getattr(prog, 'dyn_calls', ()))
+    L.append('SWR_EXPORT const u64 swr_dynamic_calls[%d]={%s};' % (len(dyn) + 1, ','.join('0x%XULL' % a for a in dyn + [0])))
     L.append('static const RtAPI* g_rt;')
     L.append('static void mod_init(const RtAPI* rt){ g_rt=rt; }')
     L.append('static SwrModule MOD;')

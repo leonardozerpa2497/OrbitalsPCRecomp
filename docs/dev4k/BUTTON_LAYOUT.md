@@ -16,8 +16,16 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   search of the text for the inlined two-level lookup (0x70 / 0x18 strides with a byte key) finds no other copy (the two other byte-keyed
   0x18 maps, 0x453efec / 0x4540f4c, are gameplay maps on actors). The runtime wraps that function: a Switch request (and, for
   PlayStation, the widget's Xbox fallback) looks up 1 (PlayStation) / 2 (Xbox) first and falls back to the original platform when the key
-  has no entry. Nothing in guest memory is written. Fail closed: the entry, both element strides, the key / texture loads and the two
-  callers' `bl` words are checked; a miss logs "button icons: not applied (...)" and the icons stay Nintendo.
+  has no entry or its texture is NULL (the output is put back first). Nothing in guest memory is written. Fail closed: the entry, both
+  element strides, the key / texture loads and the two callers' `bl` words are checked; a miss logs "button icons: not applied (...)"
+  and the icons stay Nintendo.
+- Build requirement: both callers reach the lookup with a direct `bl`, which the generated code compiles to a direct C call that never
+  looks at `g_disp`. `codegen.py` `DYNAMIC_CALLS` lists main+0x40c5ce0 for this build id, so those two calls go through the dispatch
+  table (`CALLDYN`) and the module exports `swr_dynamic_calls`. **The game code (`Orbitals_code.dll`) must be generated again with this
+  SwitchRecomp** (`switchrecomp.py` on the game folder, as at install); only the two C chunks holding the callers change, so a kept
+  build folder recompiles just those. A runtime with an older code module logs "button icons: not applied (the game code calls the icon
+  lookup directly ...)" and keeps Nintendo icons. Test: `python3 -m unittest tests.test_button_layout` (generated caller, wrapper,
+  NULL / missing fallback, and the old direct call shown to bypass it).
 - Log: "Orbitals: button icons: PlayStation icons (icon lookup main+40c5ce0 wrapped)"; once, if any key lacks the layout's icon,
   "a key without a PlayStation icon keeps the platform 3 one".
 - Before (removed): a low-priority thread scanned all guest memory once a second for those 4-entry maps and rewrote their Switch
@@ -35,9 +43,9 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   platform layer `Platforms/Switch2/Config/GeneratedSwitch2Input.ini`; the pak's own `Switch2Input.ini` replaced (patched pak,
   `/tmp` tool, booted fine): the redirect data does not come from the config at run time. CommonInput platform settings in the
   same layers did not change the icons either.
-- `button_accept_bottom=1`: the runtime empties the redirect maps of `UEnhancedInputPlatformData` objects (vtable
-  main+0x7fecb38, TMap at +0x28) as they load (wrappers on the object's virtual functions; the memory scan
-  that also did it is removed) and the user
+- `button_accept_bottom=1`: the runtime points each redirect of `UEnhancedInputPlatformData` objects (vtable
+  main+0x7fecb38, TMap at +0x28) at its own source context as they load (wrappers on the object's virtual functions, see below; the
+  memory scan that also did it is removed) and the user
   Game.ini gives the UI the PC contexts. Result: lobby and later screens accept with the bottom button and go back with the
   right one, prompts matching. CommonUI's own buttons (title "Comenzar", main menu items, the lobby's "Comenzar") keep the
   platform's accept key (right button): that comes from the platform's `bSwapForwardAndBackButtons`, not Enhanced Input.
@@ -49,10 +57,11 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 
 ## Review notes (Codex, 2026-11-26)
 - (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
-- Open for `button_accept_bottom` (why it stays experimental): the redirect maps are emptied by writing the TSparseArray
-  counters from another thread (not transactional with the game's readers); the TSet hash buckets are left as they were, so a
-  later Add on the same map could misbehave (the game is not seen adding to it after load); the virtual-function wrappers add a
-  check to every call of those shared UObject functions.
+- Open for `button_accept_bottom` (why it stays experimental): the virtual-function wrappers are not narrow: the class overrides
+  only its two destructors (slots 0 / 1, never wrapped), so every other slot is a UObject function shared with thousands of classes
+  and each of their calls pays the wrapper's check. The map write itself is one aligned store per live element (value := key, same
+  class checked), counters, free list and hash untouched. The narrow fix is the C++ consumer of the redirects (Enhanced Input's
+  rebuild) through `DYNAMIC_CALLS`; it is not found yet (the native `GetContextRedirect` 0x37fc7a0 is only reached from its exec).
 
 ## Platform accept / back keys (built 2026-11-26, offline reading of `main.bin`; not yet run on the PC)
 - `EKeys::Virtual_Accept` main+0x94ed438 and `Virtual_Back` main+0x94ed450 are 0x18-byte `FKey` copies (FName, KeyDetails pointer,
@@ -72,7 +81,10 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 - Not touched: Enhanced Input mappings (jump stays on the bottom button), and the game's own `bInvertFaceBottomFaceRight`
   (settings object +0xe1, setter 0x4602420 remaps every FaceButton_Bottom / Right binding, jump included).
 - Enhanced Input redirects: no longer emptied. Each live redirect element's target is set to its source (one aligned 8-byte store per
-  element, both must be objects of the same class); count, free list and hash are unchanged.
+  element, both must be objects of the same class); count, free list and hash are unchanged. Live elements come from the allocation
+  flags: the TBitArray's heap pointer (+0x48) whenever it is set, else its four inline words (+0x38), whatever the bit count.
+- Lifetime: vtable slots 0 / 1 (main+0x1684900 complete, 0x16849b0 deleting destructor, which frees the object) are not wrapped;
+  the wrapper acts only when the object is a platform data object both when the call starts and after it returns.
 
 ## Performance: the icon scan (parent's measurement, 2026-11-26)
 - With `button_layout=playstation` the once-a-second whole-memory scan under the memory lock gives repeatable frame spikes at 1800p
@@ -87,7 +99,7 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   alternated >= 2 runs each; expected PlayStation = Nintendo within spread (before: PlayStation 34.37 fps, p95 64.55, p99 163.46,
   spikes 10.70%, max 674 ms; Nintendo 48.30 fps, p95 25.37, p99 29.53, spikes 0.83%).
 - `button_accept_bottom=1` still uses the virtual-function wrappers on `UEnhancedInputPlatformData` (now its only way to rewrite the
-  redirects, since the scan that also caught them is gone). The precise consumer (`UEnhancedInputPlatformSettings` collecting the
+  redirects, since the scan that also caught them is gone; destructors excluded, see above). The precise consumer (`UEnhancedInputPlatformSettings` collecting the
   redirects into `RebuildControlMappings`) was searched for, not found yet: `GetContextRedirect` (exec 0x37fc710, native 0x37fc7a0)
   is only called from Blueprint; the settings object has `InputData` at +0x40 and `InputDataClasses` at +0x50 (reflection params at
   main+0x85579d8 / 0x8557a58), `bShouldLogMappingContextRedirects` param at 0x8557a90. PC check: the log must show

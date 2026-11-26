@@ -486,6 +486,15 @@ __attribute__((weak)) const SwrModule* swr_module_static(void);
 const SwrModule* swr_module_static(void) __attribute__((weak));
 #endif
 int g_code_tcc;
+static void* g_code_dl;
+
+/* 1 when the code module was generated with guest calls to pc going through the dispatch table (codegen.py DYNAMIC_CALLS), so a
+   g_disp replacement for pc also sees the game's direct calls */
+int code_dynamic_call(u64 pc){
+  const u64* l= g_code_dl? (const u64*)plat_dl_sym(g_code_dl,"swr_dynamic_calls") : NULL;
+  for(;l && *l;l++) if(*l==pc) return 1;
+  return 0;
+}
 
 static int load_code(void){
   if(swr_module_static){ g_mod=swr_module_static(); return g_mod? 0 : -1; }
@@ -502,6 +511,7 @@ static int load_code(void){
 #endif
     WARN("Cannot find the recompiled code: %s\n",p); return -1; }
   ModFn f=(ModFn)plat_dl_sym(h,"swr_module"); if(!f){ WARN("%s is not a SwitchRecomp module\n",p); return -1; }
+  g_code_dl=h;
 #if defined(_WIN32)
   { /* tell gcc builds from tcc builds by the PE linker version (ld 2.x vs tcc 6.0). tcc code is a lot slower */
     const u8* b=(const u8*)h; u32 lf; memcpy(&lf,b+0x3C,4); u8 mj=b[lf+24+2], mn=b[lf+24+3];

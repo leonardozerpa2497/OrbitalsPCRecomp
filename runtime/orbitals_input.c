@@ -6,6 +6,7 @@
 #include <math.h>
 
 void ini_set(const char* k, const char* v);   /* main.c: stores a setting and rewrites the ini */
+int code_dynamic_call(u64 pc);                /* main.c: the code module calls pc through g_disp */
 
 /* ===================================================================== button layout
    Measured on the PC (2026-11-26, docs/dev4k/BUTTON_LAYOUT.md):
@@ -16,8 +17,8 @@ void ini_set(const char* k, const char* v);   /* main.c: stores a setting and re
    - Accept on the bottom button (button_accept_bottom=1, experimental): the Switch 2 build redirects six Enhanced Input mapping contexts
      to Switch versions (BP_Switch2InputPlatformData, MappingContextRedirects) and its UI lists those Switch versions
      (MoreporkDeveloperSettings PlatformMappingContexts). The redirect data does not come from the config at run time (a user Input.ini,
-     the Generated platform layer and a replaced Switch2Input.ini inside the pak were all ignored), so the runtime empties the redirect
-     maps' targets as they load (each redirect points a context to itself, ei_virtual) and gives the UI the PC contexts (user Game.ini):
+     the Generated platform layer and a replaced Switch2Input.ini inside the pak were all ignored), so as the redirect maps load the
+     runtime points each redirect at its own source context (ei_virtual) and gives the UI the PC contexts (user Game.ini):
      the lobby, the pause menu and the game then accept on the bottom button. CommonUI's own buttons (title screen, main menu,
      "Comenzar") and Slate navigation use the platform's accept / back keys: those two EKeys globals are swapped at start (ekeys_init).
    nintendo (default) changes nothing. */
@@ -59,7 +60,7 @@ const char* orbitals_layout_overlay(void){
 /* The Switch 2 mapping context redirects are not read from the config at run time (neither the user layer nor a replaced
    Switch2Input.ini changes them: measured 2026-11-26), so they are taken out of the loaded data instead. UEnhancedInputPlatformData
    (0x78 bytes, vtable main+0x7fecb38, built by main+0x16847a0) keeps MappingContextRedirects as a TMap at +0x28: TSparseArray data
-   pointer +0x28, count +0x30, capacity +0x34, allocation bits +0x38 (inline, pointer +0x48 past 128, bit count +0x50), first free +0x58,
+   pointer +0x28, count +0x30, capacity +0x34, allocation bits (heap pointer +0x48 when set, else inline +0x38; bit count +0x50), first free +0x58,
    free count +0x5c. Each redirect's target is set to its source (IMC_UI_Default -> IMC_UI_Default): no element is added or removed, so
    the map's structure stays valid for its readers, and Enhanced Input keeps the PC version's contexts at its next rebuild. The game's own
    UI list (MoreporkDeveloperSettings PlatformMappingContexts, user Game.ini) is set to the same PC contexts so the prompts match. */
@@ -67,25 +68,7 @@ enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
 int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx);
 int mem_span_ok_locked(u64 addr, u64 size, u32 perm);   /* inside mem_with_range only */
-static int ei_clear(u64 obj){
-  if((obj&7) || !mem_span_ok_locked(obj,0x78,PERM_RW)) return 0;
-  u64 data=gr64(obj+0x28);
-  u32 num=gr32(obj+0x30), max=gr32(obj+0x34), bits=gr32(obj+0x50), nfree=gr32(obj+0x5c);
-  if(!num || num>256 || max<num || bits<num || bits>max+64 || nfree>num || (data&7)) return 0;
-  u64 words= bits>128? gr64(obj+0x48) : obj+0x38;   /* TBitArray, 4 inline words */
-  if(!data || !words || !mem_span_ok_locked(data,24ull*bits,PERM_RW) || !mem_span_ok_locked(words,(bits+31)/32*4ull,PERM_R)) return 0;
-  /* every live element {key, value, hash next, hash index}: value := key, so each redirect points a context to itself. One aligned
-     8-byte store per element (a reader sees the old or the new context, both live objects); count, free list and hash stay as they are */
-  int changed=0;
-  for(u32 i=0;i<bits;i++){
-    if(!(gr32(words+4*(i/32))>>(i%32)&1)) continue;
-    u64 e=data+24ull*i, k=gr64(e), v=gr64(e+8);
-    if(!k || !v || k==v) continue;
-    if((k&7) || (v&7) || !mem_span_ok_locked(k,8,PERM_R) || !mem_span_ok_locked(v,8,PERM_R) || gr64(k)!=gr64(v)) return changed;   /* two mapping contexts or nothing */
-    __atomic_store_n((u64*)GP(e+8),k,__ATOMIC_RELEASE); changed++;
-  }
-  if(changed) LOG("Orbitals: button layout: %d Switch mapping context redirects of the platform data at %llx now keep the PC contexts\n",changed,(unsigned long long)obj);
-  return changed>0; }
+#include "orbitals_buttons.h"   /* ei_clear, icon_lookup */
 /* Button icons: DA_PlatformInputIcons (UMoreporkInputIconDataAsset) keeps InputIcons, a TMap<FKey, entry> (0x70-byte elements at
    +0x30) whose entry holds a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2, Switch 3; 0x18-byte elements: key
    byte, texture at +8). Every lookup goes through one native function, main+0x40c5ce0 (asset, const FKey*, EPlatformType, UTexture2D**
@@ -93,20 +76,11 @@ static int ei_clear(u64 obj){
    (main+0x4634a78, which asks for Switch 3 when it has an owning player and Xbox 2 when not). InputIcons is not visible to Blueprint
    (CPF_Edit only) and no other code reads those maps (checked by the inlined lookup pattern in main.bin). button_layout=xbox /
    playstation wraps that function: a Switch request (and, for playstation, the Xbox fallback) looks up the layout's entry first and
-   falls back to the original request when the key has none. No guest memory is written. */
+   falls back to the original request when the key has none or a NULL texture (icon_lookup, orbitals_buttons.h). No guest memory is
+   written. Both callers reach it with a direct bl, which the generated code turns into a direct C call unless codegen.py lists the
+   target in DYNAMIC_CALLS: then the call goes through g_disp, where the wrapper sits. The code module says which targets it built
+   that way (swr_dynamic_calls); without it the wrapper would never run, so nothing is installed. */
 enum { ICON_LOOKUP=0x40c5ce0, ICON_CALL_BP=0x40b2e64, ICON_CALL_WIDGET=0x4634a78 };
-static GuestFn icon_lookup_orig; static int g_icon_want;   /* 1 Playstation, 2 Xbox */
-static void icon_lookup(CPU* c, u64 entry){
-  u8 plat=(u8)c->x[2];
-  if(!(plat==3 || (plat==2 && g_icon_want==1))){ icon_lookup_orig(c,entry); return; }
-  u64 x0=c->x[0], x1=c->x[1], x3=c->x[3], lr=c->x[30];
-  c->x[2]=(u64)g_icon_want;
-  icon_lookup_orig(c,entry);   /* returns with c->pc = lr; writes *out only when it finds the texture */
-  if(c->x[0]&1) return;
-  static int said; if(!__atomic_exchange_n(&said,1,__ATOMIC_RELAXED)) LOG("Orbitals: button icons: a key without a %s icon keeps the platform %d one\n",g_icon_want==1?"PlayStation":"Xbox",plat);
-  c->x[0]=x0; c->x[1]=x1; c->x[2]=plat; c->x[3]=x3; c->x[30]=lr;
-  icon_lookup_orig(c,entry);
-}
 static void icon_install(const SwrModInfo* mod){
   /* entry pacibsp; stp x29, x30, [sp, #-0x40]!; mov w12, #0x70 (outer element); mov w10, #0x18 (inner element); ldrb w12, [x11]
      (platform key); ldr x8, [x11, #8] (texture); and the two callers' bl */
@@ -119,22 +93,28 @@ static void icon_install(const SwrModInfo* mod){
   u64 pc=mod->base+ICON_LOOKUP;
   GuestFn* e=&g_disp[(pc-g_code_lo)/4];
   if(!*e){ LOG("Orbitals: button icons: not applied (icon lookup has no entry)\n"); return; }
+  if(!code_dynamic_call(pc)){ LOG("Orbitals: button icons: not applied (the game code calls the icon lookup directly: generate it again with this SwitchRecomp)\n"); return; }
   g_icon_want= g_layout==1? 2 : 1;
   icon_lookup_orig=*e; *e=icon_lookup;
   LOG("Orbitals: button icons: %s icons (icon lookup main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_LOOKUP);
 }
-/* The redirect maps are emptied before their first use: every virtual function the object's vtable reaches (UObject's own, shared with other classes)
-   goes through a wrapper that, once the call returns, empties the map of a UEnhancedInputPlatformData it was called on. The
-   loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads the map */
-enum { EI_SLOTS=64 };
+/* The redirect maps are rewritten before their first use: the virtual functions the object's vtable reaches (UObject's own, shared
+   with other classes) go through a wrapper that, once the call returns, rewrites the map of the UEnhancedInputPlatformData it was
+   called on. The loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads
+   the map. Lifetime: slots 0 and 1 are the class's complete and deleting destructors (main+0x1684900 / 0x16849b0, the only two
+   entries no other vtable shares; the deleting one frees the object), so they are never wrapped; every other virtual function
+   leaves its object alive. The object must already be a platform data object when the call starts, and still be one after it. */
+enum { EI_SLOTS=64, EI_FIRST_SLOT=2 };
 static struct { u64 pc; GuestFn orig; } g_eiw[EI_SLOTS]; static int g_neiw;
 static void ei_clear_cb(u64 a, u64 n, void* ctx){ (void)n; (void)ctx; ei_clear(a); }
+static int ei_is_data(u64 obj){ return obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable; }
 static void ei_virtual(CPU* c, u64 entry){
   u64 obj=c->x[0];
   GuestFn orig=NULL; for(int i=0;i<g_neiw;i++) if(g_eiw[i].pc==entry){ orig=g_eiw[i].orig; break; }
   if(!orig) return;
+  int mine=ei_is_data(obj);
   orig(c,entry);
-  if(obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable && gr32(obj+0x30)) mem_with_range(obj,0x78,ei_clear_cb,NULL);
+  if(mine && ei_is_data(obj) && gr32(obj+0x30)) mem_with_range(obj,0x78,ei_clear_cb,NULL);
 }
 /* The platform's accept / back keys. Unreal builds EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey() and Virtual_Back =
    GetGamepadBackKey() as copies of two face button FKeys at the end of the EKeys static initializer (main+0x50dc00, called once from
@@ -179,10 +159,13 @@ static void ei_install(const SwrModInfo* mod){
   if(!g_accept_bottom) return;
   ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;
+  u64 dtor[2]={0,0};
   for(int i=0;i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
     u64 slot=g_ei_vtable+8ull*i; if(!guest_span_readable(slot,8,8)) break;
     u64 fn=gr64(slot); if(fn<mod->size) fn+=mod->base;   /* the game's own loader relocates its data later: still module offsets here */
     if(fn<g_code_lo || fn>=g_code_hi || (fn&3)) break;   /* past the end of the vtable */
+    if(i<EI_FIRST_SLOT){ dtor[i]=fn; continue; }   /* the destructors */
+    if(fn==dtor[0] || fn==dtor[1]) continue;
     int dup=0; for(int k=0;k<g_neiw;k++) if(g_eiw[k].pc==fn) dup=1;
     GuestFn* e=&g_disp[(fn-g_code_lo)/4];
     if(dup || !*e || *e==ei_virtual) continue;
