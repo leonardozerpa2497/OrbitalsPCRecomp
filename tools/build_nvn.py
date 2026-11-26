@@ -23,6 +23,8 @@ CF = ['-ffile-prefix-map=' + ROOT + '=.', '-O2', '-g0', '-w', '-fno-strict-alias
       '-Dplat_sleep_ns=nvn_plat_sleep_ns', '-Dplat_yield=nvn_plat_yield', '-Dguest_ns=nvn_guest_ns', '-Dg_t0_ns=nvn_g_t0_ns']
 ASTC = ['-DASTCENC_NEON=0', '-DASTCENC_SVE=0', '-DASTCENC_SSE=41', '-DASTCENC_AVX=2', '-DASTCENC_X86_GATHERS=0', '-DASTCENC_POPCNT=1', '-DASTCENC_F16C=1',
         '-mavx2', '-mfma', '-mpopcnt', '-mf16c', '-O2', '-w', '-g0']
+# SWR_NVN_CFLAGS: extra flags for this layer only (e.g. '-O3 -march=native' for a build made for this PC)
+if os.environ.get('SWR_NVN_CFLAGS'): CF += os.environ['SWR_NVN_CFLAGS'].split(); ASTC += os.environ['SWR_NVN_CFLAGS'].split()
 SKIP = {'vk_window.c', 'vk_window_hwnd.c' if LINUX else 'vk_window_x11.c'}   # SDL3: replaced by the runtime's own window (hwnd / X11)
 if LINUX: INC.insert(0, '-I' + os.path.join(N, 'host', 'linux')); CF += ['-include', 'stddef.h', '-include', 'windows.h']
 CC = 'gcc' if LINUX else 'x86_64-w64-mingw32-gcc'
@@ -68,7 +70,7 @@ def compile1(src):
     cpp = src.endswith('.cpp')
     tp = 'third_party' in src
     if tp and 'astcenc' in src: cmd = [CXX, '-std=gnu++17', '-ffile-prefix-map=' + ROOT + '=.'] + ASTC
-    elif cpp: cmd = [CXX, '-std=gnu++17', '-ffile-prefix-map=' + ROOT + '=.', '-O2', '-w', '-g0', '-mavx2', '-mfma'] + INC
+    elif cpp: cmd = [CXX, '-std=gnu++17', '-ffile-prefix-map=' + ROOT + '=.', '-O2', '-w', '-g0', '-mavx2', '-mfma'] + os.environ.get('SWR_NVN_CFLAGS', '').split() + INC
     else: cmd = [CC, '-std=gnu17'] + CF + INC
     if os.path.sep + 'vk' + os.path.sep in src and not tp and not cpp: pass
     r = subprocess.run(cmd + ['-MMD', '-MF', deps, '-c', src, '-o', obj], capture_output=True, text=True)
@@ -78,6 +80,11 @@ def compile1(src):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--jobs', type=int, default=8); a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
+    stamp = os.path.join(OUT, 'cflags.txt'); want = os.environ.get('SWR_NVN_CFLAGS', '')   # other flags: every object is made again
+    if (open(stamp).read() if os.path.exists(stamp) else '') != want:
+        for f in os.listdir(OUT):
+            if f.endswith('.o'): os.remove(os.path.join(OUT, f))
+        open(stamp, 'w').write(want)
     shaders()
     with cf.ThreadPoolExecutor(a.jobs) as ex: res = list(ex.map(compile1, sources()))
     bad = [e for _, e in res if e]

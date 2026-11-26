@@ -231,6 +231,14 @@ static const char* ini_get(const char* k, const char* def){ for(int i=0;i<g_ini_
 static void ini_apply(const char* k, const char* v){
     if(!strcmp(k,"docked")) g_opt_docked=atoi(v);
     else if(!strcmp(k,"display_resolution")){ int h=atoi(v); g_opt_display_h= (h==1440 || h==2160)? h : 0; }
+    else if(!strcmp(k,"env")){ /* env=NAME=VALUE: a runtime switch (NXRT_* / SWR_*) set from the ini, before the renderer starts */
+      const char* eq=strchr(v,'='); if(eq && eq>v && (!strncmp(v,"NXRT_",5) || !strncmp(v,"SWR_",4))){ char name[96]; size_t n=(size_t)(eq-v); if(n<sizeof name){ memcpy(name,v,n); name[n]=0;
+#ifdef _WIN32
+        _putenv_s(name,eq+1);
+#else
+        setenv(name,eq+1,1);
+#endif
+        LOG("ini: environment %s=%s\n",name,eq+1); } } }
     else if(!strcmp(k,"language")) g_opt_lang=atoi(v);
     else if(!strcmp(k,"keyboard_text")){ extern char g_opt_swkbd[64]; snprintf(g_opt_swkbd,sizeof g_opt_swkbd,"%s",v); }
     else if(!strcmp(k,"log")) g_verbose=atoi(v);

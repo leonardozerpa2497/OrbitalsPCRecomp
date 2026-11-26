@@ -12,6 +12,7 @@ Get-ChildItem "$env:TEMP\dev4k" -File | ForEach-Object {
 $gbin = "$repo\gcc\Library\bin"; $tc = "$repo\games\toolchain"
 $env:PATH = "$gbin;$tc\vulkan-bin;$env:PATH"; $env:VULKAN_SDK = "$repo\runtime\edenvk\deps\vulkan-headers"
 $ErrorActionPreference='Continue'
+$env:SWR_NVN_CFLAGS = "-O3 -march=native"
 & python\python.exe -B tools\build_nvn.py --jobs 16 *> "$env:TEMP\dev4k_nvn.log"; "build_nvn exit $LASTEXITCODE"
 if ($LASTEXITCODE) { Get-Content "$env:TEMP\dev4k_nvn.log" | Select-String -Pattern 'error' | Select-Object -First 15 | ForEach-Object { $_.Line }; exit 1 }
 & python\python.exe -B switchrecomp.py --build-runtime --cc "$gbin\x86_64-w64-mingw32-gcc.exe" --target win64 --backend win32 *> "$env:TEMP\dev4k_rt.log"; "runtime exit $LASTEXITCODE"
