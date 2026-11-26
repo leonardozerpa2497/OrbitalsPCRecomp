@@ -2,6 +2,23 @@
 
 Code: `runtime/orbitals_input.c` (gyro section), `runtime/gamepad_win32.c` (SDL3 sensors). Off by default.
 
+## Follow-up: uneven motion reported over Bluetooth
+
+The owner reported visible stepping with the DualSense Edge over Bluetooth after the night run. Real feel is therefore
+**not accepted**; the integral checks below prove total rotation, not even delivery between frames.
+The user's run `20261126-134628-2937aefa` used Always, sensitivity 1.5/1.5, and had a 60 presents/s interval near its end.
+Its motion diagnostics were off, so the live sensor-to-camera delivery pattern is not established by that log.
+
+Bounded fix brief: reduce sensor batching caused by the independent 60 Hz frontend and game clocks; keep the existing
+per-sample integration, calibration, camera gates and sensitivity; run SDL on its existing thread; preserve the 60 Hz
+HID/vsync/housekeeping cadence; verify scheduler deadlines and gyro regressions, then Windows build/boot and owner feel.
+`motion_wait_until` services motion every 2 ms during the frontend's existing sleep, only when gyro sensors are needed.
+Extra polls do not publish HID, run scripts or drive settings; focus is checked again and the latest panel suppression is kept.
+It adds no interpolation or smoothing delay. Long frontend work and Bluetooth/device batching can still cause gaps.
+The deterministic independent-clock test reproduces empty camera frames at the old delivery cadence and rejects them with
+the new scheduler; this is a model, not a claim that Bluetooth hardware has been measured at 500 Hz.
+Rollback: Gyro Off disables the extra polling; revert the follow-up commit to restore the old delivery cadence with gyro on.
+
 ## Settings (Orbitals.ini, launcher Controls page)
 | key | values | default |
 |---|---|---|

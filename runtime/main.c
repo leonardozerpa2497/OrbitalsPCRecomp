@@ -17,6 +17,11 @@ const char* g_runtime_version=SWR_RUNTIME_VERSION;
 #include "audio.h"
 #include <stdatomic.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include "motion_wait.h"
+#include "orbitals_input.h"
+void video_motion_poll(void);
+#endif
 static int g_opt_null_trap;   /* null_trap= in the ini */
 
 const SwrModule* g_mod;
@@ -618,7 +623,14 @@ int swr_main(int argc, char** argv){
       /* the first dump after 6 s: people close a frozen game before 15 */
       else if(++still==60*(dumps? 15 : 6) && dumps<4){ int sec= dumps? 15 : 6; dumps++; still=0; extern void kernel_dump_threads_stall(void);
         LOG("warning: %d s without a new image (frames=%d, GPU submits=%llu)\n",sec,g_frames,(unsigned long long)g_gpu_submits); kernel_dump_threads_stall(); } }
-    next+=16666667ull; u64 now=plat_ns(); if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>100000000ull) next=now;
+    next+=16666667ull; u64 now=plat_ns();
+    if(next>now){
+#ifdef _WIN32
+      if(orbitals_gyro_wanted()) motion_wait_until(next,plat_ns,plat_sleep_ns,video_motion_poll);
+      else
+#endif
+        plat_sleep_ns((i64)(next-now));
+    } else if(now-next>100000000ull) next=now;
   }
   hid_rumble_stop();
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } LOG("Exit.\n"); fflush(NULL);
