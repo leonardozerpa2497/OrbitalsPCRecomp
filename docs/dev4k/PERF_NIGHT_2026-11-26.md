@@ -8,7 +8,8 @@ The corrected device-local snapshot implementation passed the differential oracl
 and52 FPS at2160p. Neither meets the requested <1% late-frame target. The old icon scanner has been removed;
 [LAYOUT_BENCH.md](LAYOUT_BENCH.md) records Nintendo/PlayStation comparisons without a consistent FPS regression.
 The actual `r.GTSyncType=0` experiment froze and is rejected; see [SYNC_PROBE.md](SYNC_PROBE.md).
-Flight-recorder comparisons are still running. No unmeasured setting is selected from these hypotheses.
+[FLIGHT_BENCH.md](FLIGHT_BENCH.md) records eight flight-recorder comparisons: disabling it saves about0.5–0.6 ms CPU
+and adds0.45–0.60 FPS on average. No unmeasured setting is selected from these hypotheses.
 
 ## Early baseline experiments
 
