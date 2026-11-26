@@ -489,14 +489,15 @@ static uint64_t pool_sync(pool_t_ *p, uint64_t p0, uint64_t p1, VkCommandBuffer 
     if (!p->span) p->span = nvn_dirty_span((const void *)p->lo, p->hi - p->lo);
     if (p1 > p->npages) p1 = p->npages;
     copy_batch b; b.n = 0; b.src = b.dst = VK_NULL_HANDLE;
-    uint64_t queued = 0, t0 = now_ns(), pg = p0;
+    uint64_t queued = 0, t0 = 0, pg = p0;
     while (pg < p1 && queued < budget) {
         if (!(pg & 63) && pg + 64 <= p1 && group_clean(p, pg)) { pg += 64; continue; }
         if (!page_needs(p, pg)) {
             if (atomic_load(&p->gpu_pending[pg]) && (p->hot[pg] ? p->hot_at[pg] != atomic_load(&g_sub_epoch) : p->span && p->up[pg] && nvn_dirty_since_span(p->span, (const void *)(p->base + pg * PAGE), PAGE, p->up[pg]))) {
                 atomic_fetch_add(&s_wb_stale, 1);
                 uint32_t *shadow = shadow_page(p, pg);
-                if (shadow && vkc_int("pending_merge", 1)) {   // the words the CPU changed go to the device, the GPU's stay (Eden's OnCachedWrite, by comparison instead of a trap)
+                static int merge = -1; if (merge < 0) merge = vkc_int("pending_merge", 1);
+                if (shadow && merge) {   // the words the CPU changed go to the device, the GPU's stay (Eden's OnCachedWrite, by comparison instead of a trap)
                     uint64_t stamp = nvn_dirty_now();
                     if (!p->hot[pg] && p->span) nvn_dirty_protect_span(p->span, (const void *)(p->base + pg * PAGE), PAGE);
                     uint32_t now[PAGE / 4], *s = shadow; guest_copy(now, (const void *)(p->base + pg * PAGE), PAGE);
@@ -514,6 +515,7 @@ static uint64_t pool_sync(pool_t_ *p, uint64_t p0, uint64_t p1, VkCommandBuffer 
             }
             pg++; continue; }
         uint64_t run0 = pg;
+        if (!t0) t0 = now_ns();   // the upload clock starts at the first page that needs a copy
         while (pg < p1 && pg - run0 < RUN_MAX && page_needs(p, pg)) { if (p->up[pg] && !p->hot[pg]) page_rewritten(p, pg); pg++; }
         // Pages the game never touched are not committed (the heap commits lazily): nothing to read or protect there. A use reads them as zeros and
         // keeps asking (they stay "never copied"); the background sync steps over the whole uncommitted region. VirtualQuery walks the address space's
@@ -555,7 +557,7 @@ static uint64_t pool_sync(pool_t_ *p, uint64_t p0, uint64_t p1, VkCommandBuffer 
     }
     batch_flush(&b, cb);
     if (stop_at) *stop_at = pg;
-    atomic_fetch_add(&s_up_bytes, queued); atomic_fetch_add(&s_up_ns, now_ns() - t0);
+    if (t0) { atomic_fetch_add(&s_up_bytes, queued); atomic_fetch_add(&s_up_ns, now_ns() - t0); }
     return queued;
 }
 
@@ -638,8 +640,9 @@ static int vkm_use_(uint64_t addr, uint64_t len, VkBuffer *buf, VkDeviceSize *of
     uint64_t p1 = (addr + (len ? len : 1) - p->base + PAGE - 1) / PAGE;
     // A new uniform range often shares a page that an earlier binding already uploaded. Pending GPU writes
     // still go through pool_sync, which can merge CPU writes made while the GPU owns the page.
-    if (g_use_fast == 1 && g_seen_on && p1 == p0 + 1 && p1 <= p->npages &&
-        !atomic_load(&p->gpu_pending[p0]) && !page_needs(p, p0)) {
+    int clean = g_use_fast == 1 && g_seen_on && p1 > p0 && p1 - p0 <= 16 && p1 <= p->npages;
+    for (uint64_t pg = p0; clean && pg < p1; pg++) clean = !atomic_load(&p->gpu_pending[pg]) && !page_needs(p, pg);
+    if (clean) {
         s_use_hit++;
     } else {
         atomic_fetch_add(&s_sync, 1); s_use_synced++;

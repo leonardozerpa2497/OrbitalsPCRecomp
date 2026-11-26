@@ -44,8 +44,8 @@ static _Atomic(range_t *) g_blk[NBLK];
 static inline range_t *rg(int i) { return &atomic_load_explicit(&g_blk[i >> BLK_SHIFT], memory_order_acquire)[i & (BLK - 1)]; }
 static _Atomic int g_nr;
 static uintptr_t g_pg, g_shift;
-static _Atomic uint64_t g_now = 1;
-static _Atomic uint64_t g_faults, g_preps;
+static _Alignas(64) _Atomic uint64_t g_now = 1;
+static _Alignas(64) _Atomic uint64_t g_faults, g_preps;
 static _Atomic uint64_t g_adds_total;
 static _Atomic int g_live, g_live_peak;   // number of registered pools and peak (for the memory readout line)
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }

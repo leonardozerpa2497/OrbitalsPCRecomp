@@ -2405,7 +2405,8 @@ static int walk(const uint8_t *p, int depth, uint64_t *budget, const uint8_t **s
         case OP_CLEAR_TEX: clear_tex((const p_clear_tex *)a); break;
         case OP_DRAW_TEX: RED_ONCE(120, "DrawTexture is not replayed yet"); break;
         case OP_RENDER_COND: render_cond((const p_render_cond *)a); break;
-        case OP_PUSH_CONST: { const p_push_const *r = (const p_push_const *)a; if ((uint32_t)r->offset + r->size <= DMSH_PUSH_SIZE) { memcpy(S->push[r->compute != 0] + r->offset, r->data, r->size); for (int k = 0; k < 6; k++) g_bver[k]++; } break; }
+        case OP_PUSH_CONST: { const p_push_const *r = (const p_push_const *)a; if ((uint32_t)r->offset + r->size <= DMSH_PUSH_SIZE) {   // the same bytes again keep the sets; only the stages reading this block (push[st == 5]) move
+            uint8_t *dst = S->push[r->compute != 0] + r->offset; if (memcmp(dst, r->data, r->size)) { memcpy(dst, r->data, r->size); if (r->compute) g_bver[5]++; else for (int k = 0; k < 5; k++) g_bver[k]++; } } break; }
         case OP_TF_BIND: break;
         default: state_op(h.op, a); break;
         }
