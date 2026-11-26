@@ -21,12 +21,13 @@ uint32_t vkm_pool_gen(void);
 uint64_t vkm_up_ns(void);       // time spent copying pool pages so far (vkm_stats' up_ns without its walk over every pool)   // moves whenever a memory pool comes or goes (a buffer and offset found before may be stale)
 // GPU writes into pool memory are copied back to guest memory once the submission completes (NVN pools are coherent with the CPU)
 void vkm_gpu_wrote(uint64_t addr, uint64_t len);
-// A dispatch's written range [a, a+n). vkm_wb_prepare fills the rest before the shader runs (ring offsets + 1, 0: none): base the snapshot in host memory
-// (the CPU compares, or checks the GPU with NXRT_VK_WB_GPU=2), dbase the snapshot in device memory (NXRT_VK_WB_BASE_DEVICE=1), out and after the room
-// its GPU comparison writes. A range with dbase has no other way back: everything it needs is reserved here, never after the shader
-typedef struct { uint64_t a, n, base, dbase, out, after; } vkm_writeback;
+// A dispatch's written range [a, a+n). vkm_wb_prepare plans it before the shader runs (land: its record, NULL none): the snapshot (host or device memory,
+// NXRT_VK_WB_BASE_DEVICE), the room its comparison writes, its record and its completion post are all made there or none is. After the shader
+// vkm_gpu_writebacks takes exactly that path (no plan: the whole range goes back). A planned range that will not be written back goes to vkm_wb_drop
+typedef struct { uint64_t a, n; void *land; } vkm_writeback;
 int vkm_wb_prepare(vkm_writeback *w);   // 1 when a snapshot copy was recorded (the dispatch must wait for it)
-void vkm_gpu_writebacks(const vkm_writeback *ranges, int count);
+void vkm_gpu_writebacks(vkm_writeback *ranges, int count);
+void vkm_wb_drop(vkm_writeback *ranges, int count);
 // GPU writes whose bytes the CPU knows (inline uniform updates, fills): guest memory gets the same bytes at completion; data is copied
 void vkm_cpu_also(uint64_t addr, uint64_t len, const void *data, int fill, uint32_t value);
 // Every pool's written pages, within the frame's upload budget (the policy until the replay calls vkm_use; then a background prefetch). Returns bytes queued

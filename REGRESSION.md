@@ -45,6 +45,13 @@ and runs them with SDL's dummy audio device. Pass when every line says `PASS` an
 `tests/VALIDATION.txt` has the expected output. Run it after any change to `runtime/audio.c`, `audio_*.h`,
 `rec_*.c/h` or `rec_audio_time.h`. Otherwise it's optional.
 
+```sh
+cc -O1 -g -fsanitize=address,undefined -Iruntime/nvn/vk tests/test_wb_core.c -o /tmp/wbcore && /tmp/wbcore
+```
+
+The write-back ring, plans and post room of the Vulkan layer (`runtime/nvn/vk/vk_wb_core.h`). Pass when it ends `OK`.
+Run it after any change to `vk_wb_core.h` or to how `vk_mem.c` / `vk_submit.c` use it.
+
 ## Level 2: homebrew GPU test programs
 
 Small Switch homebrew programs, each drawing one thing the runtime has broken before, recompiled with SwitchRecomp

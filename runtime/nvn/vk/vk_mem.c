@@ -4,6 +4,7 @@
 #include "vk_mem.h"
 #include "vk_submit.h"
 #include "vk_flight.h"
+#include "vk_wb_core.h"   // the ring, plans and post room, with no Vulkan in them (tests/test_wb_core.c)
 #include "wb_diff_comp.h"   // shaders/wb_diff.comp (tools/build_nvn.py)
 #include "nvn_dirty.h"   // gfx/: the dirty-page tracker the recording layer shares (nxnative's, ported by track A)
 #include <stdio.h>
@@ -729,11 +730,15 @@ static void gpu_pending(uint64_t a, uint64_t len, int d) {
 }
 
 // ---------- GPU writes back to guest memory ----------
-typedef struct { uint64_t addr, len; VkBuffer buf; vk_alloc mem; const uint8_t *cpu; uint32_t fill; int kind; uint64_t base_at, after_at, ring_end, out_at, nblk; } wb_t;   // kind 0 readback, 1 known bytes, 2 fill, 3 the words a dispatch changed
+// kind 0 readback, 1 known bytes, 2 fill, 3 the words a dispatch changed (CPU comparison), 4 the whole range through the ring, 5 the words a dispatch
+// changed (GPU comparison). A dispatch range's record (kinds 3 and 5) is made before its shader with its plan, its post room (tok) and, with wb_gpu 2,
+// the CPU check's block masks (mask, nblk of them), so nothing after the shader can fail for want of memory
+typedef struct { uint64_t addr, len; VkBuffer buf; vk_alloc mem; const uint8_t *cpu; uint32_t fill; int kind; uint64_t base_at, after_at, ring_end, out_at, nblk;
+                 VkBuffer pb; VkDeviceSize po; uint64_t tok; wbp_t plan; uint64_t mask[]; } wb_t;
 // A dispatch's written range, before and after, in a ring of cached memory (kind 3). A storage buffer is written in part: the shader's bytes are the words that differ, and only they reach guest
 // memory, so what the CPU wrote in the same range while the GPU worked stays (nxnative's unified memory has no such copy; Eden's buffer cache keeps the same two apart by the byte)
 enum { WR_SIZE = 256u << 20 };
-static VkBuffer g_wr; static vk_alloc g_wr_mem; static uint64_t g_wr_head; static _Atomic uint64_t g_wr_tail; static int g_wr_state;
+static VkBuffer g_wr; static vk_alloc g_wr_mem; static wring_t g_ring = {WR_SIZE}; static int g_wr_state;
 static int wr_init(void) {
     if (g_wr_state) return g_wr_state > 0;
     VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, WR_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL};
@@ -746,15 +751,9 @@ static int wr_init(void) {
     vkBindBufferMemory(g_vk.dev, g_wr, g_wr_mem.mem, g_wr_mem.off);
     g_wr_state = 1; return 1;
 }
-// Room for n bytes: *at its offset in the ring. Monotonic head and tail; a piece does not wrap
-static int wr_take(uint64_t n, uint64_t *at) {
-    if (!wr_init() || n > WR_SIZE / 4) return 0;
-    uint64_t h = g_wr_head, o = h % WR_SIZE;
-    if (o + n > WR_SIZE) h += WR_SIZE - o, o = 0;
-    if (h + n - atomic_load(&g_wr_tail) > WR_SIZE) return 0;
-    g_wr_head = h + n; *at = o; return 1;
-}
-static uint64_t g_wr_end(void) { return g_wr_head; }
+// Room for n bytes: *at its offset in the ring (vk_wb_core.h: a landing releases up to the oldest plan still held)
+static int wr_take(uint64_t n, uint64_t *at) { return wr_init() && wring_take(&g_ring, n, 16, at); }
+static uint64_t g_wr_end(void) { return wring_end(&g_ring); }
 // The words that differ between base and after reach guest memory, page by page; a page the shader left alone is not touched (a touch sends it to the device again)
 static void wr_land(wb_t *w) {
     const uint32_t *b = (const uint32_t *)((const uint8_t *)g_wr_mem.map + w->base_at), *a = (const uint32_t *)((const uint8_t *)g_wr_mem.map + w->after_at);
@@ -781,8 +780,8 @@ static void wr_land(wb_t *w) {
         ReleaseSRWLockShared(&g_lk);
     }
     atomic_fetch_add(&s_wb_words, changed); atomic_fetch_add(&s_wb_kept, kept);
-    atomic_store(&g_wr_tail, w->ring_end);
     if (w->len & 3) { uint8_t *d = (uint8_t *)(uintptr_t)w->addr; const uint8_t *ab = (const uint8_t *)a, *bb = (const uint8_t *)b; dm_guest_write_prepare(d + (w->len & ~3ull), 3); for (uint64_t i = w->len & ~3ull; i < w->len; i++) if (ab[i] != bb[i]) d[i] = ab[i]; }
+    wring_released(&g_ring, w->ring_end);   // after the last read of its room
 }
 // ---------- Write-backs compared on the GPU (NXRT_VK_WB_GPU, gamectl wb_gpu) ----------
 // 1: a dispatch's written range is compared with its base by wb_diff.comp right after the shader; only the 64-word blocks with a changed word come
@@ -819,11 +818,11 @@ static void wd_land(wb_t *w) {
     if (n > w->nblk) { VKRED("wb_gpu: %u records for %llu blocks: write-back of %#llx dropped", n, (unsigned long long)w->nblk, (unsigned long long)w->addr); n = 0; }
     if (w->after_at != UINT64_MAX) {   // wb_gpu 2: the CPU's comparison of the whole range, block by block, against the records
         const uint32_t *a = (const uint32_t *)((const uint8_t *)g_wr_mem.map + w->after_at), *b = (const uint32_t *)((const uint8_t *)g_wr_mem.map + w->base_at);
-        uint64_t nw = w->len / 4, *mask = calloc(w->nblk ? w->nblk : 1, sizeof *mask), bad = 0;
+        uint64_t nw = w->len / 4, *mask = w->mask, bad = 0;   // (made with the record, zeroed)
         for (uint32_t k = 0; k < n; k++) { const uint32_t *q = r + 68ull * k; if (q[0] >= w->nblk) { bad++; continue; } mask[q[0]] = (uint64_t)q[2] << 32 | q[1];
             for (int j = 0; j < 64; j++) if ((mask[q[0]] >> j & 1) && q[4 + j] != a[64ull * q[0] + j]) { bad++; break; } }
         for (uint64_t k = 0; k < w->nblk; k++) { uint64_t want = 0; for (uint64_t j = 0; j < 64 && 64 * k + j < nw; j++) if (a[64 * k + j] != b[64 * k + j]) want |= 1ull << j; if (want != mask[k]) bad++; }
-        free(mask); atomic_fetch_add(&s_wd_checked, 1); atomic_fetch_add(&s_wd_bad, bad);
+        atomic_fetch_add(&s_wd_checked, 1); atomic_fetch_add(&s_wd_bad, bad);
         if (bad) { static int said; if (said++ < 10) VKRED("wb_gpu check: %llu blocks differ from the CPU's comparison (range %#llx, %llu bytes)", (unsigned long long)bad, (unsigned long long)w->addr, (unsigned long long)w->len); }
     }
     for (uint32_t k = 0; k < n; k++, r += 68) {
@@ -841,19 +840,29 @@ static void wd_land(wb_t *w) {
         ReleaseSRWLockShared(&g_lk);
     }
     atomic_fetch_add(&s_wb_words, changed); atomic_fetch_add(&s_wd_ranges, 1); atomic_fetch_add(&s_wd_blocks, n);
-    atomic_store(&g_wr_tail, w->ring_end);
+    wring_released(&g_ring, w->ring_end);
 }
 void vkm_wd_counts(uint64_t *ranges, uint64_t *blocks, uint64_t *checked, uint64_t *bad) {
     *ranges = atomic_load(&s_wd_ranges); *blocks = atomic_load(&s_wd_blocks); *checked = atomic_load(&s_wd_checked); *bad = atomic_load(&s_wd_bad); }
 static void wb_land(void *arg);
-// Records the comparison of [addr, addr+len) (pool buffer pb at po) with its snapshot (bb at base_at) into cb: records at out in the ring, with wb_gpu 2
-// the whole range at at2 (UINT64_MAX: none). 0 only when there is no memory for its landing
-static int wd_emit(VkCommandBuffer cb, uint64_t addr, uint64_t len, VkBuffer pb, VkDeviceSize po, VkBuffer bb, uint64_t base_at, uint64_t out, uint64_t at2) {
-    uint64_t nw = len / 4, nblk = (nw + 63) / 64, osz = 16 + nblk * 272;
-    wb_t *w = calloc(1, sizeof *w); if (!w) return 0;
-    w->addr = addr; w->len = len; w->kind = 5; w->base_at = base_at; w->after_at = at2; w->out_at = out; w->nblk = nblk; w->ring_end = g_wr_end();
+static int g_wb_dropped_said;
+static _Atomic uint64_t s_wbb_host, s_wbb_dev, s_wbb_fb, s_wbb_forced, s_wbb_drop;
+// A dispatch range's record goes to the completion thread: its plan is no longer held, and its landing releases the ring up to the oldest plan still
+// held (vk_wb_core.h). Its post room was set aside before the shader
+static void wb_post_planned(wb_t *w) {
+    gpu_pending(w->addr, w->len, 1);
+    w->ring_end = wbp_release(&g_ring, &w->plan);
+    if (vks_post_fn_reserved(w->tok, wb_land, w)) return;
+    gpu_pending(w->addr, w->len, -1); atomic_fetch_add(&s_wbb_drop, 1);   // (only when the post room was lost: a record left over from another submission)
+    if (g_wb_dropped_said++ < 10) VKRED("write-back of %#llx (%llu bytes) dropped: no room for its landing", (unsigned long long)w->addr, (unsigned long long)w->len);
+    free(w);
+}
+// Records the comparison of w's range (its pool buffer, base in bb) after its shader into cb: records at out_at in the ring, with wb_gpu 2 the whole
+// range at after_at. Everything it uses was made and taken before the shader
+static void wd_emit(VkCommandBuffer cb, wb_t *w, VkBuffer bb) {
+    uint64_t nw = w->len / 4, nblk = w->nblk, osz = wbp_osz(w->len), out = w->out_at;
     vkCmdFillBuffer(cb, g_wr, out, 16, 0);
-    if (at2 != UINT64_MAX) { VkBufferCopy c = {po, at2, len}; vkCmdCopyBuffer(cb, pb, g_wr, 1, &c); }
+    if (w->after_at != UINT64_MAX) { VkBufferCopy c = {w->po, w->after_at, w->len}; vkCmdCopyBuffer(cb, w->pb, g_wr, 1, &c); }
     // The batch already made the inputs visible. Only this record's newly cleared header is an input to the dispatch.
     VkBufferMemoryBarrier2 header = {
         VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2, NULL,
@@ -864,7 +873,7 @@ static int wd_emit(VkCommandBuffer cb, uint64_t addr, uint64_t len, VkBuffer pb,
     VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, NULL, 0, 0, NULL, 1, &header, 0, NULL};
     vkCmdPipelineBarrier2(cb, &dep);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_wd_pipe);
-    VkDescriptorBufferInfo bi[3] = {{bb, base_at, len}, {pb, po, len}, {g_wr, out, osz}};
+    VkDescriptorBufferInfo bi[3] = {{bb, w->base_at, w->len}, {w->pb, w->po, w->len}, {g_wr, out, osz}};
     VkWriteDescriptorSet ws[3];
     for (int i = 0; i < 3; i++) ws[i] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, VK_NULL_HANDLE, (uint32_t)i, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[i], NULL};
     vkCmdPushDescriptorSetKHR(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_wd_layout, 0, 3, ws);
@@ -873,28 +882,16 @@ static int wd_emit(VkCommandBuffer cb, uint64_t addr, uint64_t len, VkBuffer pb,
         vkCmdPushConstants(cb, g_wd_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
         vkCmdDispatch(cb, (uint32_t)cnt, 1, 1);
     }
-    gpu_pending(addr, len, 1);
-    vks_post_fn(wb_land, w);
-    return 1;
-}
-// The comparison of a range whose snapshot is in the host ring at base_at, its room taken now; 0 when this range cannot take it (the CPU compares)
-static int wd_record(VkCommandBuffer cb, uint64_t addr, uint64_t len, VkBuffer pb, VkDeviceSize po, uint64_t base_at) {
-    int gm = wb_gpu();
-    if (!gm || (len & 3) || !len || po % g_vk.props.limits.minStorageBufferOffsetAlignment || !wd_init()) return 0;
-    uint64_t nblk = (len / 4 + 63) / 64, osz = 16 + nblk * 272, out, at2 = UINT64_MAX;
-    if (!wr_take((osz + 15) & ~15ull, &out)) return 0;
-    if (gm >= 2 && !wr_take((len + 15) & ~15ull, &at2)) return 0;   // (the room taken stays unused until the ring passes it)
-    return wd_emit(cb, addr, len, pb, po, g_wr, base_at, out, at2);
+    wb_post_planned(w);
 }
 // ---------- Snapshots in device memory (NXRT_VK_WB_BASE_DEVICE=1, with NXRT_VK_WB_GPU) ----------
 // A dispatch's snapshot goes to device memory instead of the host ring, where wb_diff.comp reads it: the whole range no longer crosses PCIe twice
 // (~150 MiB a frame each way in 2160p co-op, ~500 ranges) and only the changed blocks come back, still to the host ring. It sits at the same offset as its room in
 // the host ring (taken all the same, its host bytes unused), so it lives exactly as long. wb_gpu 2 keeps a host snapshot beside it for the CPU's check.
-// Decided before the shader runs, with every resource the comparison needs: a range that cannot take it gets the host snapshot then; after the shader
-// there is no way back (the whole range would put back CPU words the shader left alone). NXRT_VK_WB_BASE_DEVICE_FAIL=<n> (test): every n-th range that
-// could take it gets the host snapshot
+// Decided before the shader runs (wbp_plan), with every resource the comparison needs: a range that cannot take it gets the host plan then, whose
+// room the device plan never keeps; after the shader each range has exactly the path planned for it. NXRT_VK_WB_BASE_DEVICE_FAIL=<n> (test): every
+// n-th range that could take it gets the host plan
 static VkBuffer g_wrd; static vk_alloc g_wrd_mem; static int g_wrd_state;
-static _Atomic uint64_t s_wbb_host, s_wbb_dev, s_wbb_fb, s_wbb_forced, s_wbb_drop;
 static int wbd_on(void) { static int v = -1; if (v < 0) v = vkc_int("wb_base_device", 0); return v; }
 static int wrd_init(void) {
     if (g_wrd_state) return g_wrd_state > 0;
@@ -912,24 +909,12 @@ static int wrd_init(void) {
     }
     g_wrd_state = 1; VKLOG("wb_base_device: dispatch snapshots in device memory (%u MB ring, wb_gpu %d)", (unsigned)(WR_SIZE >> 20), wb_gpu()); return 1;
 }
-static int wbd_fallback(const char *why) {
+static void wbd_fallback(int why) {
+    static const char *const say[] = {"", "wb_gpu is 0: the CPU compares", "size or alignment", "no comparison pipeline or device ring",
+                                      "forced: NXRT_VK_WB_BASE_DEVICE_FAIL", "host ring full", "too many plans held", "no memory for its record"};
+    if (why == WBF_FORCED) atomic_fetch_add(&s_wbb_forced, 1);
     uint64_t n = atomic_fetch_add(&s_wbb_fb, 1);
-    if (n < 5) VKLOG("wb_base_device: a range gets the host snapshot (%s)", why);
-    return 0;
-}
-// The device snapshot of w at ring offset at, with the room its comparison writes; 0: the host snapshot instead (nothing of the plan is kept)
-static int wbd_plan(vkm_writeback *w, VkDeviceSize po, uint64_t at) {
-    static uint64_t seen; static int every = -1; if (every < 0) every = vkc_int("wb_base_device_fail", 0);
-    int gm = wb_gpu(); uint64_t len = w->n, al = g_vk.props.limits.minStorageBufferOffsetAlignment, out, at2 = UINT64_MAX;
-    uint64_t nblk = (len / 4 + 63) / 64, osz = 16 + nblk * 272;
-    if (!gm) return wbd_fallback("wb_gpu is 0: the CPU compares");
-    if ((len & 3) || po % al || at % al || len > g_vk.props.limits.maxStorageBufferRange || osz > g_vk.props.limits.maxStorageBufferRange) return wbd_fallback("size or alignment");
-    if (!wd_init() || !wrd_init()) return wbd_fallback("no comparison pipeline or device ring");
-    if (!wr_take((osz + 15) & ~15ull, &out) || out % al) return wbd_fallback("host ring full (records)");
-    if (gm >= 2 && !wr_take((len + 15) & ~15ull, &at2)) return wbd_fallback("host ring full (wb_gpu 2 copy)");   // (room taken stays unused until the ring passes it)
-    if (every > 0 && ++seen % (uint64_t)every == 0) { atomic_fetch_add(&s_wbb_forced, 1); return wbd_fallback("forced: NXRT_VK_WB_BASE_DEVICE_FAIL"); }
-    w->dbase = at + 1; w->out = out + 1; w->after = at2 != UINT64_MAX ? at2 + 1 : 0; w->base = gm >= 2 ? at + 1 : 0;
-    return 1;
+    if (n < 5) VKLOG("wb_base_device: a range gets the host plan (%s)", why >= 0 && why < (int)(sizeof say / sizeof *say) ? say[why] : "?");
 }
 // NXRT_VK_WBLOG=<bytes>: every write-back of at least that many bytes in the log, when recorded (rec) and when it lands
 // (land: bytes of guest memory it changed, only when some changed; rec only with NXRT_VK_WBLOG_REC=1), up to 100000 lines. To see what the GPU's copies back put into guest memory
@@ -948,7 +933,7 @@ static void wb_land(void *arg) {
         for (uint64_t i = 0; i < w->len; ) { uint64_t e = ((((uintptr_t)(g + i)) | (PAGE - 1)) + 1 - (uintptr_t)g); if (e > w->len) e = w->len;
             if (memcmp(a + i, g + i, (size_t)(e - i))) { dm_guest_write_prepare(g + i, (size_t)(e - i)); memcpy(g + i, a + i, (size_t)(e - i)); }
             i = e; }
-        atomic_store(&g_wr_tail, w->ring_end); gpu_pending(w->addr, w->len, -1); atomic_fetch_add(&s_wb_bytes, w->len); free(w); return; }
+        wring_released(&g_ring, w->ring_end); gpu_pending(w->addr, w->len, -1); atomic_fetch_add(&s_wb_bytes, w->len); free(w); return; }
     dm_guest_write_prepare((void *)(uintptr_t)w->addr, (size_t)w->len);
     uint8_t *d = (uint8_t *)(uintptr_t)w->addr;
     if (w->kind == 0) memcpy(d, w->mem.map, (size_t)w->len);
@@ -995,52 +980,59 @@ static void gpu_wrote(uint64_t addr, uint64_t len, int batched) {
     vks_post_fn(wb_land, w);
 }
 void vkm_gpu_wrote(uint64_t addr, uint64_t len) { gpu_wrote(addr, len, 0); }
-// A dispatch's range before the shader runs (vk_mem.h). No snapshot (all 0): the whole range goes back
+// A record made by vkm_wb_prepare that will not be posted: its plan is no longer held, its post room goes back
+static void wb_plan_drop(wb_t *w) { wbp_release(&g_ring, &w->plan); vks_post_unreserve(w->tok); free(w); }
+// A plan's record (with wb_gpu 2 and a GPU comparison, the CPU check's block masks) and its post room, or neither
+typedef struct { wb_t *r; int gm; uint64_t len; } wb_make_ctx;
+static int wb_make(void *ctx, const wbp_t *p) {
+    wb_make_ctx *m = ctx; uint64_t nm = m->gm >= 2 && p->mode != WBP_CPU ? wbp_nblk(m->len) : 0, tok = 0;
+    wb_t *r = calloc(1, sizeof *r + nm * sizeof r->mask[0]);
+    if (!r || !(tok = vks_post_reserve())) { free(r); return 0; }
+    r->tok = tok; m->r = r; return 1;
+}
+// A dispatch's range before the shader runs (vk_mem.h). No plan (land NULL): the whole range goes back
 int vkm_wb_prepare(vkm_writeback *w) {
-    VkBuffer pb; VkDeviceSize po; uint64_t at, len = w->n;
+    VkBuffer pb; VkDeviceSize po; uint64_t len = w->n;
     VkCommandBuffer cb = vks_cb();
-    w->base = w->dbase = w->out = w->after = 0;
+    if (w->land) { wb_plan_drop(w->land); w->land = NULL; }   // planned for an earlier dispatch that posted nothing (its copy is recorded: its room is not rewound)
     if (wb_off() || wb_skip(w->a, len, 0)) return 0;
-    if (vkc_int("wb_whole", 0) || !cb || !len || !vkm_addr(w->a, len, &pb, &po) || !wr_take((len + 15) & ~15ull, &at)) return 0;
-    VkBufferCopy c = {po, at, len};
-    if (wbd_on() && wbd_plan(w, po, at)) {
-        vkCmdCopyBuffer(cb, pb, g_wrd, 1, &c); atomic_fetch_add(&s_wbb_dev, len);
-        if (!w->base) return 1;
-    } else w->base = at + 1;
-    vkCmdCopyBuffer(cb, pb, g_wr, 1, &c); atomic_fetch_add(&s_wbb_host, len);
+    if (vkc_int("wb_whole", 0) || !cb || !len || !vkm_addr(w->a, len, &pb, &po) || !wr_init()) return 0;
+    static uint64_t seen; static int every = -1; if (every < 0) every = vkc_int("wb_base_device_fail", 0);
+    int gm = wb_gpu(), dev = wbd_on() != 0, gpu_ok = gm && wd_init();
+    wbp_in in = {len, po, g_vk.props.limits.minStorageBufferOffsetAlignment, g_vk.props.limits.maxStorageBufferRange, gm, dev, gpu_ok, dev && gpu_ok && wrd_init(), every, &seen};
+    wbp_t p; wb_make_ctx mc = {NULL, gm, len};
+    if (wbp_prepare(&g_ring, in, &p, wb_make, &mc, wbd_fallback) == WBP_NONE) return 0;   // (no memory: the whole range, as with a full ring)
+    wb_t *r = mc.r;
+    r->addr = w->a; r->len = len; r->pb = pb; r->po = po; r->plan = p; r->nblk = wbp_nblk(len); r->base_at = p.at; r->out_at = p.out;
+    r->kind = p.mode == WBP_CPU ? 3 : 5; r->after_at = p.mode == WBP_CPU ? p.after : p.at2;
+    VkBufferCopy c = {po, p.at, len};
+    w->land = r;
+    if (p.mode == WBP_DEV) { vkCmdCopyBuffer(cb, pb, g_wrd, 1, &c); atomic_fetch_add(&s_wbb_dev, len); if (gm < 2) return 1; }
+    vkCmdCopyBuffer(cb, pb, g_wr, 1, &c); atomic_fetch_add(&s_wbb_host, len);   // (wb_gpu 2 with a device plan: the host snapshot of the CPU's check)
     return 1;
 }
-static void gpu_wrote_base(const vkm_writeback *r) {
-    uint64_t addr = r->a, len = r->n, base = r->base;
-    if (wb_off()) return;
-    wblog("rec", addr, len, 3, 0);
-    if (wb_skip(addr, len, 1)) return;
-    VkBuffer pb; VkDeviceSize po; uint64_t at;
-    VkCommandBuffer cb = vks_cb();
-    if (r->dbase) {   // planned before the shader (wbd_plan): this comparison or none; never the host comparison or the whole range
-        if (!cb || !vkm_addr(addr, len, &pb, &po) || !wd_emit(cb, addr, len, pb, po, g_wrd, r->dbase - 1, r->out - 1, r->after ? r->after - 1 : UINT64_MAX)) {
-            atomic_fetch_add(&s_wbb_drop, 1); VKRED("wb_base_device: write-back of %#llx (%llu bytes) dropped", (unsigned long long)addr, (unsigned long long)len); }
-        return;
-    }
-    if (base && cb && vkm_addr(addr, len, &pb, &po) && wd_record(cb, addr, len, pb, po, base - 1)) return;
-    if (!base || !cb || !vkm_addr(addr, len, &pb, &po) || !wr_take((len + 15) & ~15ull, &at)) { gpu_wrote(addr, len, 1); return; }
-    wb_t *w = calloc(1, sizeof *w); w->addr = addr; w->len = len; w->kind = 3; w->base_at = base - 1; w->after_at = at; w->ring_end = g_wr_end();
-    VkBufferCopy c = {po, at, len}; vkCmdCopyBuffer(cb, pb, g_wr, 1, &c);
-    gpu_pending(addr, len, 1);
-    vks_post_fn(wb_land, w);
+// After the shader: exactly the path planned before it
+static void gpu_wrote_base(vkm_writeback *rg, VkCommandBuffer cb) {
+    wb_t *w = rg->land; rg->land = NULL;
+    wblog("rec", w->addr, w->len, 3, 0);
+    (void)wb_skip(w->addr, w->len, 1);   // (counts the bytes; the pool's flags were looked at when the plan was made)
+    if (w->kind == 5) { wd_emit(cb, w, w->plan.mode == WBP_DEV ? g_wrd : g_wr); return; }
+    VkBufferCopy c = {w->po, w->after_at, w->len}; vkCmdCopyBuffer(cb, w->pb, g_wr, 1, &c);
+    wb_post_planned(w);
 }
-void vkm_gpu_writebacks(const vkm_writeback *ranges, int count) {
+void vkm_gpu_writebacks(vkm_writeback *ranges, int count) {
     VkCommandBuffer cb = vks_cb();
-    if (!cb || !count || wb_off()) return;
+    if (!cb || !count || wb_off()) { vkm_wb_drop(ranges, count); return; }
     // These operations only read game buffers and write to independent staging allocations.
     vk_mem_barrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     for (int i = 0; i < count; i++) {
-        if (ranges[i].base || ranges[i].dbase) gpu_wrote_base(&ranges[i]);
+        if (ranges[i].land) gpu_wrote_base(&ranges[i], cb);
         else gpu_wrote(ranges[i].a, ranges[i].n, 1);
     }
     wb_to_host(cb);
 }
+void vkm_wb_drop(vkm_writeback *ranges, int count) { for (int i = 0; i < count; i++) if (ranges[i].land) { wb_plan_drop(ranges[i].land); ranges[i].land = NULL; } }
 // Writes whose bytes the CPU knows (inline uniform updates, fills): the GPU writes the mirror in order, guest memory gets the same bytes at completion
 void vkm_cpu_also(uint64_t addr, uint64_t len, const void *data, int fill, uint32_t value) {
     wb_t *w = calloc(1, sizeof *w); w->addr = addr; w->len = len; w->kind = fill ? 2 : 1; w->fill = value;
