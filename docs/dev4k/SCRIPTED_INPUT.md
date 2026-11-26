@@ -41,6 +41,13 @@ A comma-separated list of presses: `<ms>:<hex mask>[/<duration ms>]`, e.g. `0:1,
 - `duration`: how long it is held; default 300 ms, or 1400 ms when the mask has a stick bit (>= 40).
 - Parsing stops at the first malformed entry.
 
+## Repeatable co-op scene
+
+Use `tools/dev4k/scenes/coop_ship.txt` with Nintendo layout and `tools/dev4k/scenes/coop_ship_bottom.txt`
+with Xbox or PlayStation (bottom accept). The second script preserves every time, duration and stick action and
+changes only face-button mask1 to2. It is the script used for the observed PlayStation/Xbox checks and layout/flight
+benchmarks. Use the fixed copied benchmark profile; progress to other areas only in a separate validation copy.
+
 ## The script clock
 By default real time minus the time the renderer spent waiting for shaders to be translated, so a held stick moves a
 character as far in a first session as in later ones. `SWR_INPUT_CLOCK=game`: the clock moves only when the game presents a
