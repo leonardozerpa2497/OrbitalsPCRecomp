@@ -1800,7 +1800,10 @@ static void dispatch(const p_dispatch *dp) {
     VkDescriptorSet ds = write_set(cs, 5, &swrites);
     if (!ds) return;
     barrier_all(cb);
-    for (int i = 0; i < g_nwb; i++) g_wb[i].base = vkm_wb_base(g_wb[i].a, g_wb[i].n);   // the ranges before the shader: only the words it changes go back to guest memory
+    int snap = 0;
+    for (int i = 0; i < g_nwb; i++) snap |= (g_wb[i].base = vkm_wb_base(g_wb[i].a, g_wb[i].n)) != 0;   // the ranges before the shader: only the words it changes go back to guest memory
+    // The snapshot copies read what the shader is about to write: the shader waits for them (write after read: an execution dependency is enough)
+    if (snap) vk_mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe); g_last_pipe = VK_NULL_HANDLE;
     if (!cs->push) vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
     if (g_pd) {
