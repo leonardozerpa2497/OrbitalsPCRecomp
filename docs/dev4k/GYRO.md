@@ -21,6 +21,17 @@ Rollback: Gyro Off with calibration/test/log diagnostics also off disables the e
 to restore the old delivery cadence with gyro on. The real-pad L+R+Plus settings chord suppresses intermediate batches before
 the next normal poll opens the panel. The headless backend has a no-op motion poll.
 
+**Live diagnosis after the cadence patch:** the isolated title run `20261126-135538-6c4ec35e` still reports only
+21-26 gyro samples per sensor second for P1 (Edge); P2 (ordinary DualSense) reports about 450. The game exits0 and
+the launcher state file stays byte-identical. Thus the cadence patch is NOT a demonstrated fix for this complaint.
+A standalone SDL3.4.16 probe, after the owner connected USB, measures two Edge endpoints: approximately73 and1001 events/s
+over10 host seconds. Windows PnP ancestry identifies the slow endpoint as `DS5BRIDGE0001` under the USBip emulated host;
+the fast endpoint is the physical USB controller under the AMD host. DS5Bridge's own log independently reports23-25Hz
+before the cable connection and around70-78Hz afterwards. The four extra bridge processes are watchdogs of one main process,
+not evidence of competing bridge instances. No bridge, HidHide, driver or network settings were changed.
+The reviewed cadence patch is committed locally but is not installed as the owner's runtime; the prior installed runtime
+and source files are restored pending a direct-Bluetooth/bridge isolation test. Do not mark real feel accepted.
+
 ## Settings (Orbitals.ini, launcher Controls page)
 | key | values | default |
 |---|---|---|
