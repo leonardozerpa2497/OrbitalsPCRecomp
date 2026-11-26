@@ -478,7 +478,8 @@ void orbitals_gyro_pad(int s, u32 id, u16 vendor, u16 product, u32 buttons, u16 
   test_unlock();
   if(ended) acc_clear(s);   /* the synthetic turn of an ended test never reaches the camera */
   if(testing) return;
-  if(!active) acc_clear(s);   /* pause/toggle/aim gating also invalidates held angular velocity immediately */
+  if(!allowed) acc_clear(s);
+  else if(!active){ acc_lock(s); Acc[s].rate_ns=0; acc_unlock(s); }   /* preserve the legacy pending integral */
   if(!has_gyro) return;
   for(int i=0;i<n;i++){
     gyro_sample(s,g,&m[i],0,active,manual);
@@ -674,9 +675,9 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
      never catch up after a gap, and expire the rate after 50 ms without a new sample. Synthetic tests retain their exact
      sampled integral and never mix in a held real-pad rate. Gate closure invalidates it before the next open frame. */
   u64 taken=__atomic_load_n(&Acc[id].taken_ns,__ATOMIC_RELAXED);
-  if(G.latest && !G.test && open && !gap && !ended && taken && now>taken && now-taken<=50000000ull && Acc[id].rate_ns
+  if(G.latest && !G.test && open && !gap && !ended && taken && now>taken && Acc[id].rate_ns
      && (now<Acc[id].rate_ns || now-Acc[id].rate_ns<=50000000ull)){
-    double elapsed=(now-taken)/1e9;
+    double elapsed=fmin((now-taken)/1e9,0.05);
     yaw+=Acc[id].rate_yaw*elapsed; pitch+=Acc[id].rate_pitch*elapsed;
   }
   if(!open || gap || ended) Acc[id].rate_ns=0;
@@ -739,6 +740,7 @@ void orbitals_input_install(const SwrModInfo* mod){
      || !g_disp[(g_add_yaw-g_code_lo)/4] || !g_disp[(g_add_pitch-g_code_lo)/4]){ LOG("gyro: camera functions not found, gyro unavailable\n"); return; }
   int a=bind(mod,UPDATE_ROTATION,0xd503237fu,update_rotation_base,&rot_orig);
   int b=bind(mod,UPDATE_ROTATION_SUB,0x395cf008u,update_rotation_sub,&rot_sub_orig);
+  LOG("gyro: delivery %s%s\n",G.latest && !G.test? "latest velocity on camera clock" : "sampled integral",G.latest && G.test? " (gyro_test overrides latest for this session)" : "");
   char armed[64]="";
   if(G.test){ test_arm(); snprintf(armed,sizeof armed,", synthetic test armed (start delay %.1f s)",G.test_delay); }
   LOG("gyro: bound to the camera (UpdateRotation %s, override %s)%s\n",a?"yes":"no",b?"yes":"no",armed);

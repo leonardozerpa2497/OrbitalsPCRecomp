@@ -657,6 +657,37 @@ static void test_latest_delivery(void){
   CHECK(cam_yaw(0)==before,"new device inherited velocity");
 }
 
+static void latest_seed(u64* t, float yaw, float pitch){
+  PadMotion m[2]={{*t,{pitch,yaw,0},{0,9.80665f,0}},{*t+4000000ull,{pitch,yaw,0},{0,9.80665f,0}}};
+  *t+=8000000ull;orbitals_gyro_pad(0,100,0x054c,0x0df2,0,0,m,2,1,1);
+}
+static void test_latest_boundaries(void){
+  float r=(float)(90/RAD2DEG);u64 t=1000000000ull;
+  reset();orbitals_input_ini("gyro_delivery","latest");CHECK(G.latest,"ini ignored");
+  G.sens_x=2;G.sens_y=.5;G.invert=3;G.tightening=0;
+  tick(0,.016f);tick(1,.016f);clock_ns+=16000000ull;latest_seed(&t,r,r);tick(0,.016f);tick(1,.016f);
+  CHECK(NEAR(cam_yaw(0),2.88,.001)&&NEAR(cam_pitch(0),-.72,.001),"sensitivity/inversion %.3f %.3f",cam_yaw(0),cam_pitch(0));
+  CHECK(cam_yaw(1)==0&&cam_pitch(1)==0,"cross-player motion");
+  for(int k=1;k<=5;k++){
+    clock_ns+=16000000ull;double b=cam_yaw(0);tick(0,.016f);
+    if(k>=4)CHECK(cam_yaw(0)==b,"expired velocity at %d ms",k*16);
+  }
+  reset();G.latest=1;G.sens_x=G.sens_y=1;G.tightening=0;t=1000000000ull;
+  tick(0,.016f);clock_ns+=60000000ull;latest_seed(&t,r,0);tick(0,.060f);
+  CHECK(NEAR(cam_yaw(0),-4.5,.001),"slow frame cap %.3f",cam_yaw(0));
+  /* Legacy samples still apply the one pending integral on a pause press. */
+  reset();G.sens_x=G.sens_y=1;G.tightening=0;t=1000000000ull;
+  tick(0,.016f);clock_ns+=16000000ull;latest_seed(&t,r,0);
+  orbitals_gyro_pad(0,100,0x054c,0x0df2,1u<<20,0,NULL,0,1,1);tick(0,.016f);
+  CHECK(NEAR(cam_yaw(0),-.36,.001),"legacy pending integral changed");
+  reset();G.latest=1;G.test=1;T.state=4;G.sens_x=G.sens_y=1;G.tightening=0;t=1000000000ull;
+  tick(0,.016f);clock_ns+=16000000ull;latest_seed(&t,r,0);tick(0,.016f);
+  CHECK(NEAR(cam_yaw(0),-.36,.001)&&!Acc[0].rate_ns,"test did not retain sampled delivery");
+  Acc[0].rate_ns=clock_ns;Acc[0].rate_yaw=90;clock_ns+=16000000ull;double b=cam_yaw(0);tick(0,.016f);
+  CHECK(cam_yaw(0)==b,"test consumed a held real rate");
+  orbitals_input_ini("gyro_delivery","samples");CHECK(!G.latest,"samples rollback ignored");
+}
+
 int main(void){
   g_mem = calloc(1, MEM);
   static GuestFn disp[64]; g_disp = disp;
@@ -746,6 +777,7 @@ int main(void){
   test_end_after_publication_clears_it();
   test_settle_after_clock_snapshot();
   test_latest_delivery();
+  test_latest_boundaries();
   test_delay_parsing();
   test_delay_holds_start_until_delay();
   test_delay_keeps_gate_and_ends();

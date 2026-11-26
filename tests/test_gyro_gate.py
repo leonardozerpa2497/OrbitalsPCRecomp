@@ -14,6 +14,13 @@ RUNTIME = ROOT / "runtime" / "orbitals_input.c"
 CLASS_CHECK = "  if(!gyro_isa(pc,CLS_PLAYER_CONTROLLER)) return GATE_NOT_GAME_CONTROLLER;   /* before any game field */\n"
 EXTENDED_READ = "  q->cinematic=*GP(pc+PC_CINEMATIC); q->main=gr64(pc+PC_MAIN_CHARACTER); q->controlled=gr64(pc+PC_CONTROLLED_ACTOR);\n"
 MUTATIONS = {
+    "latest expiry removed": [("now-Acc[id].rate_ns<=50000000ull", "1")],
+    "latest tick cap removed": [("fmin((now-taken)/1e9,0.05)", "((now-taken)/1e9)")],
+    "latest sensitivity ignored": [("Acc[s].rate_yaw=dyaw/dt", "Acc[s].rate_yaw=dyaw/dt/G.sens_x")],
+    "latest inversion ignored": [("if(G.invert&1)", "if(0)")],
+    "latest parser ignored": [("G.latest=!strcmp(v,\"latest\")", "G.latest=0")],
+    "latest real producer during test": [("if(G.latest && !G.test){", "if(G.latest){")],
+    "latest consumer during test": [("if(G.latest && !G.test && open", "if(G.latest && open")],
     "no controller class check": [(CLASS_CHECK, "")],
     "controller class checked after the game fields": [(CLASS_CHECK, ""), (EXTENDED_READ, EXTENDED_READ + CLASS_CHECK)],
     "chain entry compared with the class": [("  return entry==want+CLASS_BASE_CHAIN;", "  return entry==want;")],
