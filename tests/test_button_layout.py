@@ -346,8 +346,21 @@ static void sp_cycle(void){ put32(IDATA+0x280+12,0); put32(IDATA+0x200+0x10,0); 
 static void sp_hs(void){ put32(ODATA+0xe0+0x60,6); }                         /* key 2's hash size is not a power of two */
 static void sp_inline_hs(void){ put32(ODATA+0x60,2); }                       /* inline hash (no heap) with two buckets */
 static void sp_inner_free(void){ put32(ODATA+0x4c,4); }                      /* key 0: more free than entries */
-static void sp_heap_bits(void){ put32(ASSET+0x58,200); put32(ASSET+0x38,200); } /* past the inline flags without a heap pointer */
+static void sp_heap_bits(void){ put32(ASSET+0x58,200); put32(ASSET+0x38,200); put32(ASSET+0x3c,256); put32(ASSET+0x5c,256); }
+                                                                  /* past the inline flags without a heap pointer, capacities consistent */
 static void sp_data(void){ put64(ASSET+0x30,0x2004); }                        /* misaligned element array */
+/* review regressions: each one was accepted and replaced 7001 -> 7101 before the capacity / occupancy checks */
+static void sp_cap(void){ put32(ASSET+0x3c,0); }                             /* key map capacity below its count */
+static void sp_bitcap(void){ put32(ASSET+0x5c,NKEYS-1); }                    /* key flags capacity below the bit count */
+static void sp_inline_cap(void){ put32(ASSET+0x5c,129); }                    /* inline key flags claiming more than 128 bits */
+static void sp_inner_cap(void){ put32(ODATA+0x24,1); }                       /* key 0's platform map: capacity below count */
+static void sp_inner_bitcap(void){ put32(ODATA+0x44,2); }                    /* key 0's platform flags: capacity below bits */
+static void sp_inner_bits(void){ put32(ODATA+0x40,2); }                      /* key 0's platform flags: bit count != count */
+/* key 0: the PlayStation entry (index 1) marked free but still reached from the hash (Switch -> 1 -> PlayStation; bucket 0 holds the
+   chain 2 -> 1 -> 0 with hash size 1), counts consistent: flags 0b101, one free */
+static void sp_inner_freed(void){ put32(ODATA+0x28,5); put32(ODATA+0x4c,1); }
+static void sp_inner_live(void){ put32(ODATA+0x28,3); put32(ODATA+0x4c,0); }  /* key 0: 2 bits set, 3 entries, none free */
+static void sp_inner_heapbits(void){ put64(ODATA+0x38,0x0e00); put32(0x0e00,0); put32(ODATA+0x44,256); } /* heap flags: all free */
 int main(void){
   same("PlayStation through caller A",0,0,SW_A,1,PS_A);
   same("PlayStation through caller B",1,0,SW_A,1,PS_A);
@@ -370,6 +383,11 @@ int main(void){
   bad("hash size",sp_hs,"platform map"); bad("inline hash with two buckets",sp_inline_hs,"platform map");
   bad("inner free count",sp_inner_free,"platform map"); bad("flags past the inline words",sp_heap_bits,"key map flags");
   bad("misaligned elements",sp_data,"key map not readable");
+  bad("key map capacity",sp_cap,"key map counts"); bad("key flags capacity",sp_bitcap,"key map counts");
+  bad("inline key flags capacity",sp_inline_cap,"key map flags");
+  bad("platform map capacity",sp_inner_cap,"platform map"); bad("platform flags capacity",sp_inner_bitcap,"platform map");
+  bad("platform flags bit count",sp_inner_bits,"platform map"); bad("freed PlayStation entry still hashed",sp_inner_freed,"platform map");
+  bad("platform flags live count",sp_inner_live,"platform map"); bad("platform heap flags all free",sp_inner_heapbits,"platform map");
   { asset_init(); IconPair t[ICON_PAIRS]; int np=0; const char* why=icon_pairs(ASSET,1,t,&np);
     CHECK(!why && np==6,"well-formed map: %s, %d Switch textures",why?why:"accepted",np); }
   for(int i=0;i<40;i++) same("repeated",i&1,0,SW_A,1,PS_A);   /* more prompts than the trace keeps */

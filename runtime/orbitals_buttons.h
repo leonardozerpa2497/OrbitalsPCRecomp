@@ -49,44 +49,62 @@ static void icon_lookup(CPU* c, u64 entry){
    the original's: the only write is *pad, and only to a texture of the same asset. */
 enum { ICON_PAIRS=256, ICON_KEYS_MAX=4096, ICON_PLATS_MAX=64 };
 typedef struct { u64 sw, rep; } IconPair;   /* rep 0: no usable replacement (missing, NULL or ambiguous) */
-/* One key's TMap<EPlatformType, UTexture2D*> inside its 0x70-byte InputIcons element el: data +0x18, count +0x20, free count +0x4c,
-   hash inline +0x50 / heap +0x58, hash size +0x60; 0x18-byte elements {platform byte, texture +8, hash next +0x10}. Looked up through
-   the hash exactly as the game does (bucket = platform & (size-1)). 1 found (*tex may be NULL), 0 no entry, -1 malformed. */
+/* A TSparseArray's allocation flags (TBitArray, 4 inline words, heap pointer, bit count, bit capacity) checked against its element count
+   num, capacity max and free count nfree: bits == num <= max <= limit, bit capacity >= bits (<= 128 without a heap pointer), the words
+   readable, and exactly num - nfree bits set. The flag words, or 0 when any of that fails (*live_bad: only the set bits disagree). */
+static u64 icon_flags(u64 inl, u64 heap, u32 bits, u32 maxbits, u32 num, u32 max, u32 nfree, u32 limit, int* live_bad){
+  *live_bad=0;
+  if(max>limit || num>max || nfree>num || bits!=num || maxbits<bits) return 0;
+  if(!heap && maxbits>128) return 0;
+  u64 words= heap? heap : inl;
+  if((words&3) || !guest_span_readable(words,(bits+31)/32*4ull,4)) return 0;
+  u32 live=0;
+  for(u32 i=0;i<bits;i++) live+=gr32(words+4*(i/32))>>(i%32)&1;
+  if(live!=num-nfree){ *live_bad=1; return 0; }
+  return words;
+}
+static int icon_live(u64 words, u32 i){ return gr32(words+4*(i/32))>>(i%32)&1; }
+/* One key's TMap<EPlatformType, UTexture2D*> inside its 0x70-byte InputIcons element el: data +0x18, count +0x20, capacity +0x24,
+   allocation flags (inline words +0x28, heap +0x38, bit count +0x40, bit capacity +0x44), free count +0x4c, hash inline +0x50 / heap
+   +0x58, hash size +0x60; 0x18-byte elements {platform byte, texture +8, hash next +0x10}. Looked up through the hash exactly as the
+   game does (bucket = platform & (size-1)); every element the chain reaches must be allocated. 1 found (*tex may be NULL), 0 no
+   entry, -1 malformed. */
 static int icon_plat_find(u64 el, u8 plat, u64* tex){
   u64 data=gr64(el+0x18), hash=gr64(el+0x58);
-  u32 num=gr32(el+0x20), nfree=gr32(el+0x4c), hs=gr32(el+0x60);
-  if(num>ICON_PLATS_MAX || nfree>num) return -1;
+  u32 num=gr32(el+0x20), max=gr32(el+0x24), nfree=gr32(el+0x4c), hs=gr32(el+0x60);
+  int live_bad;
+  u64 words=icon_flags(el+0x28,gr64(el+0x38),gr32(el+0x40),gr32(el+0x44),num,max,nfree,ICON_PLATS_MAX,&live_bad);
+  if(!words) return -1;
   if(num==nfree) return 0;
   if(!hs || hs>ICON_PLATS_MAX || (hs&(hs-1))) return -1;
   if(!hash){ if(hs!=1) return -1; hash=el+0x50; }
   if(!data || (data&7) || (hash&3) || !guest_span_readable(data,0x18ull*num,8) || !guest_span_readable(hash,4ull*hs,4)) return -1;
   int32_t i=(int32_t)gr32(hash+4ull*(plat&(hs-1)));
   for(u32 steps=0; i!=-1; steps++){
-    if(i<0 || (u32)i>=num || steps>=num) return -1;   /* out of the array, or a chain longer than the map (a cycle) */
+    if(i<0 || (u32)i>=num || steps>=num || !icon_live(words,(u32)i)) return -1;   /* out of range, a cycle, or a freed element */
     u64 e=data+0x18ull*(u32)i;
     if((u8)gr32(e)==plat){ *tex=gr64(e+8); return 1; }
     i=(int32_t)gr32(e+0x10);
   }
   return 0;
 }
-/* InputIcons at asset+0x30 (TMap<FKey, entry>): data +0x30, count +0x38, allocation flags (inline words +0x40, heap +0x50, bit count
-   +0x58), free count +0x64; 0x70-byte elements. Lists {Switch texture -> layout texture} for every live key into t (*np pairs).
-   NULL when the list is usable, else why not (then nothing is translated). */
+/* InputIcons at asset+0x30 (TMap<FKey, entry>): data +0x30, count +0x38, capacity +0x3c, allocation flags (inline words +0x40, heap
+   +0x50, bit count +0x58, bit capacity +0x5c), free count +0x64; 0x70-byte elements. Lists {Switch texture -> layout texture} for every
+   live key into t (*np pairs). NULL when the list is usable, else why not (then nothing is translated). */
 static const char* icon_pairs(u64 asset, u8 want, IconPair* t, int* np){
   *np=0;
   if((asset&7) || !guest_span_readable(asset,0x80,8)) return "asset not readable";
   u64 data=gr64(asset+0x30), heap=gr64(asset+0x50);
-  u32 num=gr32(asset+0x38), bits=gr32(asset+0x58), nfree=gr32(asset+0x64);
-  if(num>ICON_KEYS_MAX || nfree>num || bits!=num) return "key map counts";
+  u32 num=gr32(asset+0x38), max=gr32(asset+0x3c), bits=gr32(asset+0x58), maxbits=gr32(asset+0x5c), nfree=gr32(asset+0x64);
+  if(max>ICON_KEYS_MAX || num>max || nfree>num || bits!=num || maxbits<bits) return "key map counts";
   if(num==nfree) return NULL;
-  u64 words= heap? heap : asset+0x40;
-  if(!heap && bits>128) return "key map flags";
-  if(!data || (data&7) || (words&3) || !guest_span_readable(data,0x70ull*num,8) || !guest_span_readable(words,(bits+31)/32*4ull,4))
-    return "key map not readable";
-  u32 live=0;
+  if(!heap && (bits>128 || maxbits>128)) return "key map flags";
+  if(!data || (data&7) || !guest_span_readable(data,0x70ull*num,8)) return "key map not readable";
+  int live_bad;
+  u64 words=icon_flags(asset+0x40,heap,bits,maxbits,num,max,nfree,ICON_KEYS_MAX,&live_bad);
+  if(!words) return live_bad? "key map live count" : "key map flags";
   for(u32 i=0;i<bits;i++){
-    if(!(gr32(words+4*(i/32))>>(i%32)&1)) continue;
-    live++;
+    if(!icon_live(words,i)) continue;
     u64 el=data+0x70ull*i, sw=0, rep=0;
     int f=icon_plat_find(el,3,&sw); if(f<0) return "platform map";
     if(!f || !sw) continue;
@@ -97,7 +115,7 @@ static const char* icon_pairs(u64 asset, u8 want, IconPair* t, int* np){
     if(*np>=ICON_PAIRS) return "too many icons";
     t[k].sw=sw; t[k].rep=rep; (*np)++;
   }
-  return live==num-nfree? NULL : "key map live count";
+  return NULL;
 }
 static GuestFn icon_prompt_orig;
 static void icon_prompt(CPU* c, u64 entry){

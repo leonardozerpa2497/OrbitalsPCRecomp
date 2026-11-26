@@ -20,14 +20,16 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   bits) its Switch texture and that key's PlayStation / Xbox texture, through each key's platform-map hash as the game does. After the
   call it reads only `*pad`: if the call changed it to a Switch texture of that list, it writes the same key's layout texture. Kept
   Switch (fail closed): a Switch texture shared by keys whose replacements differ, a missing or NULL replacement, an unchanged slot, or
-  a map that fails any bound (counts, free count, live count vs flags, inline flags past 128 bits, alignment / readability, hash size,
-  index range, chain longer than the map). Registers, return value, `*keyboard`, `*label`, `*labelKey` and its reference count are the
+  a map (the key map or any key's platform map) that fails any bound: count <= capacity <= limit, free count <= count, flag bit count ==
+  count <= flag capacity (<= 128 without a heap pointer), set flag bits == count - free count, alignment / readability, hash size, index
+  range, chain longer than the map, or a hash chain reaching an element whose flag is clear (freed). Registers, return value, `*keyboard`, `*label`, `*labelKey` and its reference count are the
   original's. Logs: "button prompts: PlayStation icons (action prompt main+40c5020 wrapped)" at start; once, "a prompt keeps its Switch
   icon (reason)". `SWR_ICON_TRACE=1` logs the first 32 prompt calls (caller main+offset, asset, old -> new texture, reason kept) and
   the first 16 icon lookup calls. **The code module must be generated again** (both callers' chunks change); an older module logs
   "button prompts: not applied (... generate it again ...)". Cost: one walk of the asset's keys (two small hash lookups each) per
   prompt call, only with xbox / playstation; not measured. Tests: `python3 -m unittest tests.test_button_layout` (both generated callers
-  through CALLDYN, PlayStation / Xbox, missing / NULL / ambiguous / malformed maps, no asset read after the call, registers and every
+  through CALLDYN, PlayStation / Xbox, missing / NULL / ambiguous / malformed maps (capacities below counts and a freed but still
+  hashed entry included, review regressions), no asset read after the call, registers and every
   other guest byte equal to the unwrapped run, trace opt-in and bounded; the install words are checked against `main.bin` when it is
   present, `ORBITALS_MAIN_BIN`).
 - The game ships every icon: `DA_PlatformInputIcons` maps each FKey to a texture per `EPlatformType`
