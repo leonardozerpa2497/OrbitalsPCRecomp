@@ -225,7 +225,7 @@ typedef struct {
   float bias[3]; int calibrated;           /* 1 auto, 2 stored/manual */
   float grav[3]; int grav_ok;              /* low-passed accelerometer (points up at rest) */
   u64 last_t;                              /* timestamp of the previous sample */
-  u64 still_t0; int still_n; double still_sum[3]; float still_min[3], still_max[3];
+  u64 still_t0, still_last; int still_n; double still_sum[3]; float still_min[3], still_max[3];
   int toggled_off, button_was, has_gyro; u64 button_t0;   /* button_t0: plat_ns() when the gyro button went down */
   int logged_samples;
   u64 log_t0; int log_n; double log_sum[3]; float log_min[3], log_max[3]; double drift[3];   /* gyro_log */
@@ -238,11 +238,55 @@ static void acc_lock(int s){ while(__atomic_exchange_n(&Acc[s].lock,1,__ATOMIC_A
 static void acc_unlock(int s){ __atomic_store_n(&Acc[s].lock,0,__ATOMIC_RELEASE); }
 static void acc_clear(int s){ acc_lock(s); Acc[s].yaw=Acc[s].pitch=0; acc_unlock(s); }
 
-/* The launcher creates a new executable directory each run, but data/save is a junction to the profile's persistent saves.
-   Keep calibration there so a fresh session sees it, and different launcher profiles stay isolated. */
-static void calib_path(char* p, size_t n){ snprintf(p,n,"%ssave/gyro_calibration.txt",g_datadir); }
+/* The launcher creates a new executable directory each run, with data/save a junction to the profile's save directory. That
+   directory only holds the game's own save kinds (export, backup and restore refuse anything else, and a restore replaces it), so
+   the calibration lives one level up: the profile directory (a standalone install: Orbitals_data). The junction is resolved to the
+   real directory first, so a fresh session finds it and other profiles stay isolated; any failure stores nothing. */
+#ifdef _WIN32
+typedef wchar_t CalibChar;
+#define CALIB_N 4096
+static int calib_path(CalibChar* p, size_t n, int tmp){
+  char save[1200]; wchar_t wsave[1200];
+  if((size_t)snprintf(save,sizeof save,"%ssave",g_datadir)>=sizeof save) return 0;
+  plat_mkdir(save);
+  if(!MultiByteToWideChar(CP_ACP,MB_ERR_INVALID_CHARS,save,-1,wsave,1200)) return 0;
+  HANDLE h=CreateFileW(wsave,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,NULL);
+  if(h==INVALID_HANDLE_VALUE) return 0;
+  BY_HANDLE_FILE_INFORMATION info; DWORD len=0;
+  if(GetFileInformationByHandle(h,&info) && (info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))
+    len=GetFinalPathNameByHandleW(h,p,(DWORD)n,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+  CloseHandle(h);
+  if(!len || len>=n) return 0;                      /* failed or truncated */
+  wchar_t* name=wcsrchr(p,L'\\');
+  if(!name || _wcsicmp(name+1,L"save")) return 0;   /* not the save directory the launcher or the install made */
+  *name=0;
+  if(!wcsrchr(p,L'\\') || name[-1]==L':') return 0;   /* never a volume root */
+  const wchar_t* file= tmp? L"\\gyro_calibration.txt.tmp" : L"\\gyro_calibration.txt";
+  size_t used=(size_t)(name-p), add=wcslen(file);
+  if(used+add>=n) return 0;
+  memcpy(name,file,(add+1)*sizeof *file); return 1;
+}
+static FILE* calib_open(const CalibChar* p, int write){ return _wfopen(p,write? L"wb" : L"rb"); }
+static int calib_replace(const CalibChar* tmp, const CalibChar* p){ return MoveFileExW(tmp,p,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0; }
+#else
+typedef char CalibChar;
+#define CALIB_N 4096
+static int calib_path(CalibChar* p, size_t n, int tmp){
+  char save[1200];
+  if((size_t)snprintf(save,sizeof save,"%ssave",g_datadir)>=sizeof save) return 0;
+  plat_mkdir(save);
+  char* real=realpath(save,NULL); if(!real) return 0;
+  char* name=strrchr(real,'/');
+  int ok= name && name!=real && !strcmp(name+1,"save");   /* the save directory, and its parent is not / */
+  if(ok){ *name=0; size_t w=(size_t)snprintf(p,n,"%s/gyro_calibration.txt%s",real,tmp? ".tmp" : ""); ok= w<n; }
+  free(real); return ok;
+}
+static FILE* calib_open(const CalibChar* p, int write){ return fopen(p,write? "wb" : "rb"); }
+static int calib_replace(const CalibChar* tmp, const CalibChar* p){ return rename(tmp,p)==0; }
+#endif
 static int calib_load(GyroPad* g){
-  char p[1200]; calib_path(p,sizeof p); FILE* f=fopen(p,"rb"); if(!f) return 0;
+  CalibChar p[CALIB_N]; if(!calib_path(p,CALIB_N,0)) return 0;
+  FILE* f=calib_open(p,0); if(!f) return 0;
   char line[256]; int found=0;
   while(fgets(line,sizeof line,f)){
     unsigned vid,pid; float b[3];
@@ -251,18 +295,13 @@ static int calib_load(GyroPad* g){
   fclose(f); return found;
 }
 static int calib_store(const GyroPad* g){
-  char p[1200], tmp[1300]; calib_path(p,sizeof p); snprintf(tmp,sizeof tmp,"%s.tmp",p);
-  char dir[1200]; snprintf(dir,sizeof dir,"%ssave",g_datadir); plat_mkdir(dir);
-  FILE* in=fopen(p,"rb"); FILE* out=fopen(tmp,"wb"); if(!out){ if(in) fclose(in); return 0; }
+  CalibChar p[CALIB_N], tmp[CALIB_N];
+  if(!calib_path(p,CALIB_N,0) || !calib_path(tmp,CALIB_N,1)) return 0;
+  FILE* in=calib_open(p,0); FILE* out=calib_open(tmp,1); if(!out){ if(in) fclose(in); return 0; }
   if(in){ char line[256]; while(fgets(line,sizeof line,in)){ unsigned vid,pid; if(sscanf(line,"%x:%x",&vid,&pid)==2 && vid==g->vendor && pid==g->product) continue; fputs(line,out); } fclose(in); }
   fprintf(out,"%04x:%04x %.6f %.6f %.6f\n",g->vendor,g->product,g->bias[0],g->bias[1],g->bias[2]);
   int failed=ferror(out); if(fclose(out)) failed=1;
-  if(failed) return 0;
-#ifdef _WIN32
-  return MoveFileExA(tmp,p,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
-#else
-  return rename(tmp,p)==0;
-#endif
+  return !failed && calib_replace(tmp,p);
 }
 
 static void still_reset(GyroPad* g, u64 t, const float* raw){
@@ -273,9 +312,11 @@ static void still_reset(GyroPad* g, u64 t, const float* raw){
    well under that, so a slow steady turn is not taken for one). The automatic one never moves a stored calibration by more than
    0.015 rad/s. Manual (gyro_calibrate=1, or the gyro button held): a 2 s / 3 s window that starts once asked */
 static void still_sample(int s, GyroPad* g, u64 t, const float* raw, int manual_hold){
-  /* Polling uses the host clock; the first SDL sensor event can switch to the device's smaller timestamp.
-     Start a fresh still window instead of waiting for that clock to catch up with the host's uptime. */
-  if(t<g->still_t0){ still_reset(g,t,raw); return; }
+  /* The sample clock can switch between the host's poll time and the device's own sensor timestamps, either way (the first SDL
+     sensor event; polling again after 500 ms without events). A sample that goes back, or comes over 50 ms after the previous one
+     (the gap gyro_sample never integrates across), starts a fresh still window: the window only measures time the pad was sampled. */
+  u64 last=g->still_last; g->still_last=t;
+  if(t<last || t-last>50000000ull){ still_reset(g,t,raw); return; }
   int moving=0;
   for(int k=0;k<3;k++){
     if(fabsf(raw[k])>0.04f) moving=1;
