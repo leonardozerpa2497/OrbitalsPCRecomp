@@ -4,7 +4,8 @@
 import re
 
 from . import dialogs, graphics, navigation
-from .core import DEFAULT_SETTINGS, LOG, WINDOWS, LauncherError, gamepad_inventory, graphics_settings
+from .core import (BUTTON_LAYOUTS, DEFAULT_SETTINGS, GYRO_BUTTON_MODES, GYRO_BUTTONS, GYRO_MODES, GYRO_SENSITIVITIES, LOG, WINDOWS,
+                   LauncherError, gamepad_inventory, graphics_settings)
 from .look import native_size
 from .neo import motion_allowed
 from .rows import Rows
@@ -151,6 +152,23 @@ class ControlsPage(SettingsPage):
         self.scan_row = rows.action("Connected controllers", "Scan again", self.scan, lambda: self.found, enabled=free)
         if WINDOWS:
             rows.switch("Controller vibration", describe="Rumble, on controllers that have it.", enabled=free, **setting("vibration"))
+        rows.choice("Button layout", tuple(BUTTON_LAYOUTS), enabled=free, **setting("button_layout"),
+                    describe="Xbox and PlayStation use their button prompts: A / Cross accepts, B / Circle goes back. "
+                             "Nintendo keeps the original buttons and prompts.")
+        rows.group("Gyro aiming")
+        gyro_on = lambda: free() and self.app.settings()["gyro"] != "Off"
+        rows.choice("Gyro aiming", tuple(GYRO_MODES), enabled=free, **setting("gyro"),
+                    describe="Aim with the controller's motion sensor, on controllers that have one.")
+        for name, key in (("Horizontal sensitivity", "gyro_sensitivity_x"), ("Vertical sensitivity", "gyro_sensitivity_y")):
+            rows.choice(name, GYRO_SENSITIVITIES, show=lambda v: f"{v:.2f}", enabled=gyro_on, **setting(key),
+                        describe="Camera degrees per degree the controller turns.")
+        rows.choice("Gyro button", tuple(GYRO_BUTTONS), enabled=gyro_on, **setting("gyro_button"),
+                    describe="The button that pauses the gyro or toggles it, as set in Button action.")
+        rows.choice("Button action", tuple(GYRO_BUTTON_MODES), enabled=gyro_on, **setting("gyro_button_mode"),
+                    describe="Hold to pause: the gyro stops while the button is held. Press to toggle: each press turns it off or on.")
+        rows.switch("Calibrate at next launch", enabled=gyro_on, **setting("gyro_calibrate"),
+                    describe="Put the controller down on a table for 2 seconds after the game starts; the calibration is stored per "
+                             "controller model. Holding the gyro button 3 s with the controller lying still also calibrates.")
         rows.group("Keyboard and mouse")
         rows.choice("Assigned player", (1, 2), show=lambda n: f"Player {n}", enabled=free, **setting("keyboard"),
                     describe="Choose Player 2 for co-op with one controller. Keyboard and mouse take over Player 1 when its controller "
