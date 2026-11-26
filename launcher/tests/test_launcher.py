@@ -338,6 +338,73 @@ class LocalStateTest(unittest.TestCase):
             self.assertIn("fixture", (run / "console.log").read_text())
             self.assertFalse((run / core.EXE).exists())
 
+    def launched_ini(self, **settings):
+        """The session's Orbitals.ini of a launch with these profile settings (the game is a stand-in process)."""
+        self.profiles.update_active(settings=self.profiles.profile["settings"] | settings)
+        game = core.installation(self.native)
+        process, run = self.launch_stand_in(game)
+        process.wait(timeout=10)
+        return {line.partition("=")[0]: line.partition("=")[2] for line in (run / "Orbitals.ini").read_text().splitlines() if "=" in line}
+
+    def launch_stand_in(self, game):
+        popen = subprocess.Popen
+        with patch("launcher.core.subprocess.Popen", side_effect=lambda c, **k: popen([sys.executable, "-c", "pass"], **k)):
+            return core.launch(game, self.profiles)
+
+    CONTROL_KEYS = {"button_layout", "gyro", "gyro_sensitivity_x", "gyro_sensitivity_y", "gyro_button", "gyro_button_mode", "gyro_calibrate"}
+
+    def test_controls_defaults_write_nothing_new(self):
+        self.assertFalse(self.CONTROL_KEYS & set(self.launched_ini()))
+
+    def test_button_layout_xbox_and_playstation(self):
+        self.assertEqual(self.launched_ini(button_layout="Xbox")["button_layout"], "xbox")
+        self.assertEqual(self.launched_ini(button_layout="PlayStation")["button_layout"], "playstation")
+        self.assertNotIn("button_layout", self.launched_ini(button_layout="Nintendo"))
+
+    def test_gyro_always_writes_the_five_keys(self):
+        ini = self.launched_ini(gyro="Always", gyro_sensitivity_x=2.25, gyro_sensitivity_y=0.5, gyro_button="Right paddle",
+                                gyro_button_mode="Press to toggle")
+        self.assertEqual({key: ini[key] for key in self.CONTROL_KEYS - {"button_layout", "gyro_calibrate"}},
+                         {"gyro": "always", "gyro_sensitivity_x": "2.25", "gyro_sensitivity_y": "0.50", "gyro_button": "paddle_right",
+                          "gyro_button_mode": "toggle"})
+        self.assertNotIn("gyro_calibrate", ini)
+        self.assertEqual(self.launched_ini(gyro="While aiming (left trigger)")["gyro"], "aim")
+        defaults = self.launched_ini(gyro="Always", gyro_sensitivity_x=1.5, gyro_button="None")
+        self.assertEqual((defaults["gyro_sensitivity_x"], defaults["gyro_button"]), ("1.50", "none"))
+
+    def test_gyro_off_writes_no_gyro_key_even_when_set_up(self):
+        ini = self.launched_ini(gyro="Off", gyro_sensitivity_x=3.0, gyro_calibrate=True)
+        self.assertFalse({key for key in ini if key.startswith("gyro")})
+        self.assertTrue(self.profiles.settings["gyro_calibrate"])
+
+    def test_gyro_calibrate_is_written_once(self):
+        self.assertEqual(self.launched_ini(gyro="Always", gyro_calibrate=True)["gyro_calibrate"], "1")
+        self.assertFalse(self.profiles.settings["gyro_calibrate"])
+        self.assertEqual(core.Profiles(self.profiles.root).settings["gyro"], "Always")
+        self.assertNotIn("gyro_calibrate", self.launched_ini())
+
+    def test_controls_settings_are_validated(self):
+        core.validate_settings(core.DEFAULT_SETTINGS | {"gyro_sensitivity_x": 4, "gyro_sensitivity_y": 0.5})
+        for key, value in (("button_layout", "Sega"), ("gyro", "Sometimes"), ("gyro_button", "Select"), ("gyro_button_mode", "Hold"),
+                           ("gyro_sensitivity_x", 0.25), ("gyro_sensitivity_y", 4.25), ("gyro_sensitivity_x", 1.6),
+                           ("gyro_sensitivity_x", "1.5"), ("gyro_sensitivity_y", True), ("gyro_calibrate", 1), ("gyro_calibrate", None)):
+            with self.subTest(key=key, value=value), self.assertRaises(core.LauncherError):
+                core.validate_settings(core.DEFAULT_SETTINGS | {key: value})
+
+    def test_old_control_keys_of_the_game_ini_are_replaced(self):
+        old = "".join(f"{key}=old\n" for key in self.CONTROL_KEYS) + "gyro_extra=keep\n"
+        (self.native / "Orbitals.ini").write_text(old)
+        ini = self.launched_ini()
+        self.assertFalse(self.CONTROL_KEYS & set(ini))
+        self.assertEqual(ini["gyro_extra"], "keep")
+        game = core.installation(self.native)
+        self.profiles.update_active(settings={"button_layout": "Xbox", "gyro": "Always"})
+        text = (self.launch_stand_in(game)[1] / "Orbitals.ini").read_text()
+        for key, value in (("button_layout", "xbox"), ("gyro", "always"), ("gyro_button", "touchpad")):
+            self.assertEqual(text.count(f"\n{key}="), 1)
+            self.assertIn(f"\n{key}={value}\n", text)
+        self.assertNotIn("old", text)
+
     def test_os_process_error_keeps_active_saves(self):
         game = core.installation(self.native)
         original = subprocess.Popen

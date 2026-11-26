@@ -42,7 +42,16 @@ DEFAULT_SETTINGS = {
     "upscale": "Standard", "vsync": True, "volume": 100, "keyboard": 1,
     "mouse_camera": None, "mouse_sensitivity": None, "vibration": True,
     "fps": "30 (reference)", "gfx_preset": "High", "tv_resolution": "1080p (console)",
+    "button_layout": "Nintendo", "gyro": "Off", "gyro_sensitivity_x": 1.5, "gyro_sensitivity_y": 1.5,
+    "gyro_button": "Touchpad click", "gyro_button_mode": "Hold to pause", "gyro_calibrate": False,
 }
+# Orbitals.ini values of the controls settings; Nintendo is the game as it is.
+BUTTON_LAYOUTS = {"Nintendo": None, "Xbox": "xbox", "PlayStation": "playstation"}
+GYRO_MODES = {"Off": "off", "Always": "always", "While aiming (left trigger)": "aim"}
+GYRO_BUTTONS = {"Touchpad click": "touchpad", "Mute button": "mute", "Left paddle": "paddle_left", "Right paddle": "paddle_right",
+                "L3": "l3", "R3": "r3", "None": "none"}
+GYRO_BUTTON_MODES = {"Hold to pause": "pause", "Press to toggle": "toggle"}
+GYRO_SENSITIVITIES = tuple(step / 4 for step in range(2, 17))   # 0.5 to 4.0
 # setting values saved by the launcher's earlier French interface, read as today's
 LEGACY_VALUES = {"Fenêtré": "Windowed", "Sans bordure": "Borderless",
                  "30 (référence)": "30 (reference)", "60 (expérimental)": "60 (experimental)"}
@@ -777,7 +786,12 @@ def validate_settings(settings):
             or settings["mouse_sensitivity"] is not None and (
                 type(settings["mouse_sensitivity"]) is not int or not 10 <= settings["mouse_sensitivity"] <= 500)
             or settings["fps"] not in graphics.FPS_MODES
-            or settings["tv_resolution"] not in graphics.TV_RESOLUTIONS):
+            or settings["tv_resolution"] not in graphics.TV_RESOLUTIONS
+            or settings["button_layout"] not in BUTTON_LAYOUTS or settings["gyro"] not in GYRO_MODES
+            or settings["gyro_button"] not in GYRO_BUTTONS or settings["gyro_button_mode"] not in GYRO_BUTTON_MODES
+            or any(type(settings[key]) not in (int, float) or settings[key] not in GYRO_SENSITIVITIES
+                   for key in ("gyro_sensitivity_x", "gyro_sensitivity_y"))
+            or type(settings["gyro_calibrate"]) is not bool):
         raise LauncherError("A profile setting is invalid.")
     try:
         graphics.validate(graphics_settings(settings))
@@ -1144,9 +1158,18 @@ def launch(game, profiles):
         ini = game.root / "Orbitals.ini"
         text = ini.read_text(encoding="utf-8-sig", errors="replace") if ini.is_file() else ""
         fps = graphics.FPS_MODES[settings["fps"]]
-        text = re.sub(r"(?m)^\s*(ue_fps|display_resolution)\s*=.*$", "", text)
+        keys = ("ue_fps", "display_resolution", "button_layout", "gyro", "gyro_sensitivity_x", "gyro_sensitivity_y", "gyro_button",
+                "gyro_button_mode", "gyro_calibrate")
+        text = re.sub(rf"(?m)^\s*({'|'.join(keys)})\s*=.*$", "", text)
         tv = graphics.TV_RESOLUTIONS[settings["tv_resolution"]]
         text = text.rstrip() + f"\nue_fps={fps}\n" + (f"display_resolution={tv}\n" if tv else "")
+        if layout := BUTTON_LAYOUTS[settings["button_layout"]]:
+            text += f"button_layout={layout}\n"
+        calibrate = settings["gyro"] != "Off" and settings["gyro_calibrate"]
+        if settings["gyro"] != "Off":
+            text += (f"gyro={GYRO_MODES[settings['gyro']]}\ngyro_sensitivity_x={settings['gyro_sensitivity_x']:.2f}\n"
+                     f"gyro_sensitivity_y={settings['gyro_sensitivity_y']:.2f}\ngyro_button={GYRO_BUTTONS[settings['gyro_button']]}\n"
+                     f"gyro_button_mode={GYRO_BUTTON_MODES[settings['gyro_button_mode']]}\n" + ("gyro_calibrate=1\n" if calibrate else ""))
         write_text(run / "Orbitals.ini", apply_graphics(run, text, settings))
         with (run / "console.log").open("wb") as console:
             process = subprocess.Popen(args, cwd=run, env=env, stdout=console, stderr=subprocess.STDOUT,
@@ -1154,6 +1177,8 @@ def launch(game, profiles):
     except (LauncherError, OSError):
         prune_run_payload(run)
         raise
+    if calibrate:   # one launch only
+        profiles.update_active(settings=profiles.profile["settings"] | {"gyro_calibrate": False})
     LOG.info("event=play pid=%s args=%s fps=%s", process.pid, " ".join(args[1:]), fps)
     return process, run
 
