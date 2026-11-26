@@ -1,5 +1,17 @@
 # Co-op performance on the owner's PC (Ryzen 7 9800X3D, RTX 5090, 4K 240 Hz) — night of 2026-11-26
 
+## Current evidence
+
+The table below preserves the early baseline experiments, not the final installed build's performance.
+The corrected device-local snapshot implementation passed the differential oracle and forced fallback checks;
+[DEVICE_BASELINE_BENCH.md](DEVICE_BASELINE_BENCH.md) records its alternating runs: approximately58 FPS at1800p
+and52 FPS at2160p. Neither meets the requested <1% late-frame target. The old icon scanner has been removed;
+[LAYOUT_BENCH.md](LAYOUT_BENCH.md) records Nintendo/PlayStation comparisons without a consistent FPS regression.
+The actual `r.GTSyncType=0` experiment froze and is rejected; see [SYNC_PROBE.md](SYNC_PROBE.md).
+Flight-recorder comparisons are still running. No unmeasured setting is selected from these hypotheses.
+
+## Early baseline experiments
+
 Bench: `tools/dev4k/bench.sh` + scene `tools/dev4k/scenes/coop_ship.txt` (owner's save copy in the launcher test profile,
 co-op split screen in the asteroid field, both players idle), window 120-180 s, `ue_fps=60`, `env=NXRT_VK_DEFER=1` (as
 installed), launcher env as PLAY sets it (`NXRT_VK_WB_GPU=1`). Stats: `tools/dev4k/bench_stats.py` (late = interval > 17.7 ms).
@@ -48,12 +60,11 @@ same scene/window: PlayStation 36.03/34.37 FPS, p95 64.57/64.55 ms, p99 138.85/1
 p95 25.37 ms, p99 29.53 ms. The second PlayStation run had no OpenRGB detection, ruling out that initial explanation.
 The direct icon-lookup replacement must be verified before keeping PlayStation as the owner's default.
 
-## Next work by expected gain (not done tonight)
-1. Compare snapshots in device-local memory while retaining compact host output and CPU/GPU coherence. First implementation
-   failed review for lifetime and allocation-failure handling; do not install it until corrected and differentially checked.
-   Readbacks on demand are a larger alternative requiring read-fault tracking; current dirty bits detect writes only.
+## Remaining hypotheses and resolved work
+1. Device-local snapshots were corrected, reviewed, installed and differentially checked; see the current evidence above.
+   Readbacks on demand remain a larger alternative requiring read-fault tracking; current dirty bits detect writes only.
 2. Dependency-exact barriers (ceiling measured: PASS_BARRIER=0 gave +2 FPS / -1.7 ms GPU) and batching the 42 tiny dispatches.
 3. A larger staging ring sized from the frame's uploads (512 MB helped +1.1 FPS but waits remained).
-4. 3D resolution below the output at 4K (`scene_resolution`) is the only setting that approaches 60 today (1440p 3D: 52 FPS);
-   it is a picture change, so it stays the owner's choice.
+4. 3D resolution below the output at 4K (`scene_resolution`) changes the picture. The early1440p-3D result was52 FPS;
+   it has not been remeasured with device-local snapshots, so it is not a proven final-build result.
 5. 90 / 120 / unlimited: not tried; nothing reaches 60 yet, and the runtime's frame pacing emulates a 60 Hz display.
