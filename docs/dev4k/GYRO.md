@@ -32,6 +32,16 @@ not evidence of competing bridge instances. No bridge, HidHide, driver or networ
 The reviewed cadence patch is committed locally but is not installed as the owner's runtime; the prior installed runtime
 and source files are restored pending a direct-Bluetooth/bridge isolation test. Do not mark real feel accepted.
 
+**Authorized direct Bluetooth isolation:** after the owner's approval, backed up the bridge task, process arguments,
+restore file and HidHide state through the documented read IOCTLs. Clean desktop-session `ds5bridge --quit` detached its
+virtual device and removed its own hidden-device entry. No manual HidHide write was needed. After unplugging USB the
+owner pressed PS to reconnect. A standalone SDL probe measured the real Edge at83.4 events/s over10.002 host seconds,
+sensor interval p50 14.288 / p95 23.297 / max37.584ms. The ordinary DualSense measured498.1 events/s in the same probe.
+This improves on the bridge path but remains irregular: the bridge is not proven to be the sole cause. USB direct was
+about1001 events/s. Evidence `/tmp/orbitals-direct-bluetooth-rate.txt`. Owner feel with the bridge temporarily stopped
+is pending; restore the original running DS5Bridge task after that interactive test. Original HidHide snapshot is
+`C:\llm\tmp\orb\bridge-test-20261126-140145\hidhide-state.json`; the task was enabled and running.
+
 ## Settings (Orbitals.ini, launcher Controls page)
 | key | values | default |
 |---|---|---|
