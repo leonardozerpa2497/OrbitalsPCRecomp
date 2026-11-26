@@ -75,13 +75,19 @@ C_TEST = r'''
 static u8 g_mem[0x10000];
 GuestFn swr_interp_entry;
 #define GP(a) (g_mem+(u64)(a))
-static u64 gr64(u64 a){ u64 v; memcpy(&v,GP(a),8); return v; }
-static u32 gr32(u64 a){ u32 v; memcpy(&v,GP(a),4); return v; }
+static int g_retired; static int g_stale;   /* guest reads made after a callee retired the object */
+static u64 gr64(u64 a){ u64 v; if(g_retired) g_stale++; memcpy(&v,GP(a),8); return v; }
+static u32 gr32(u64 a){ u32 v; if(g_retired) g_stale++; memcpy(&v,GP(a),4); return v; }
 static void put64(u64 a,u64 v){ memcpy(GP(a),&v,8); }
 static void put32(u64 a,u32 v){ memcpy(GP(a),&v,4); }
 #define LOG(...) ((void)0)
 enum { PERM_R=1, PERM_RW=3 };
 static int mem_span_ok_locked(u64 a,u64 n,u32 p){ (void)p; return a+n<=sizeof g_mem; }
+static int guest_span_readable(u64 a,u64 n,u64 al){ return !(a&(al-1)) && a+n<=sizeof g_mem; }
+static int g_locked;
+static int mem_with_range(u64 a,u64 n,void (*fn)(u64,u64,void*),void* ctx){ if(!guest_span_readable(a,n,1)) return 0;
+  g_locked++; fn(a,n,ctx); g_locked--; return 1; }
+static u64 g_ei_vtable;
 typedef struct CPU CPU;
 #include "orbitals_buttons.h"
 
@@ -91,8 +97,60 @@ void F_LOOKUP(CPU* RESTRICT c, u64 e){ (void)e; calls++; u8 p=(u8)c->x[2]; plat_
   int k=entry_kind[p&3]; if(k) put64(c->x[3], k==2? 0x1000+p : 0); c->x[0]=k!=0; c->pc=c->x[30]; }
 GENERATED
 
+
 static int fails;
 #define CHECK(cond,...) do{ if(!(cond)){ fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } }while(0)
+/* ei_virtual through the real install (ei_wrap_vtable): vtable at VT (module offsets), code at CODE_LO. Slots 0 / 1 destructors,
+   2 -> RETIRE (its callee retires the object: vtable word cleared, every later guest read counted), 3 -> PLAIN, 4 a duplicate
+   of 2, 5 a word outside the code (end of the vtable). */
+enum { VT=0x6000, CODE_LO=0x10000000, MOD_SIZE=0x100, OBJ=0x7000, OTHER=0x7100, MAPD=0x7400, OTHERD=0x7500, KEY=0x7800, VAL=0x7880 };
+static GuestFn ei_disp[MOD_SIZE/4];
+static struct { int n; u64 x[4], lr, entry; u64 val_seen; } rec[4];
+static void orig_dtor(CPU* c,u64 e){ (void)c; (void)e; rec[0].n++; }
+static void orig_retire(CPU* c,u64 e){ rec[2].n++; for(int i=0;i<4;i++) rec[2].x[i]=c->x[i]; rec[2].lr=c->x[30]; rec[2].entry=e;
+  rec[2].val_seen=gr64(MAPD+8); put64(c->x[0],0); g_retired=1; c->pc=c->x[30]; }
+static void orig_plain(CPU* c,u64 e){ rec[3].n++; for(int i=0;i<4;i++) rec[3].x[i]=c->x[i]; rec[3].entry=e; rec[3].val_seen=gr64(c->x[0]==OBJ? MAPD+8 : OTHERD+8);
+  c->pc=c->x[30]; }
+static void map_at(u64 o,u64 d,u64 vt){ memset(GP(o),0,0x78); put64(o,vt); put64(o+0x28,d); put32(o+0x30,1); put32(o+0x34,4);
+  put32(o+0x38,1); put32(o+0x50,1); put32(o+0x54,128); put32(o+0x58,0xffffffffu); put32(o+0x5c,0);
+  put64(d,KEY); put64(d+8,VAL); put64(d+16,0x0000000500000003ull); }
+static void call(u64 obj,u64 slot){ static CPU c; memset(&c,0,sizeof c); c.mem=g_mem; c.x[0]=obj; c.x[1]=0x11; c.x[2]=0x22; c.x[3]=0x33;
+  c.x[30]=0xabc0; u64 fn=CODE_LO+4*slot; g_retired=0; g_stale=0; ei_disp[slot](&c,fn); g_retired=0;
+  CHECK(c.pc==0xabc0,"returned through the original (pc %llx)",(unsigned long long)c.pc); }
+static void ei_tests(void){
+  memset(g_mem,0,sizeof g_mem); memset(rec,0,sizeof rec);
+  u64 words[]={0,4,8,12,8,0x7777777}; for(int i=0;i<6;i++) put64(VT+8*i,words[i]); put64(VT+48,0);
+  for(int i=0;i<4;i++) ei_disp[i]= i==2? orig_retire : i==3? orig_plain : orig_dtor;
+  g_ei_vtable=VT; g_neiw=0;
+  int n=ei_wrap_vtable(VT,CODE_LO,MOD_SIZE,CODE_LO,CODE_LO+MOD_SIZE,ei_disp);
+  CHECK(n==2 && ei_disp[0]==orig_dtor && ei_disp[1]==orig_dtor && ei_disp[2]==ei_virtual && ei_disp[3]==ei_virtual,
+        "install: %d wrapped, destructors untouched, duplicate and end skipped",n);
+  CHECK(ei_wrap_vtable(VT,CODE_LO,MOD_SIZE,CODE_LO,CODE_LO+MOD_SIZE,ei_disp)==2,"installing twice wraps nothing more");
+  put64(KEY,0x9990); put64(VAL,0x9990);   /* two mapping contexts of one class */
+  map_at(OBJ,MAPD,VT); map_at(OTHER,OTHERD,0x6800);
+  u8 before[0x78], other[0x78], odata[24]; memcpy(before,GP(OBJ),0x78); memcpy(other,GP(OTHER),0x78); memcpy(odata,GP(OTHERD),24);
+  /* the callee retires the object: the map is already rewritten when it starts, no guest read follows */
+  call(OBJ,2);
+  CHECK(rec[2].n==1 && rec[2].entry==CODE_LO+8 && rec[2].x[0]==OBJ && rec[2].x[1]==0x11 && rec[2].x[2]==0x22 && rec[2].x[3]==0x33 &&
+        rec[2].lr==0xabc0,"original called once with the caller's registers (calls %d)",rec[2].n);
+  CHECK(rec[2].val_seen==KEY,"redirect rewritten before the original ran (%llx)",(unsigned long long)rec[2].val_seen);
+  CHECK(g_stale==0,"%d guest reads after the object was retired",g_stale);
+  CHECK(!memcmp(GP(OBJ)+8,before+8,0x70) && gr64(MAPD)==KEY && gr64(MAPD+16)==0x0000000500000003ull,
+        "map structure kept: count, capacity, bits, free list, key and hash");
+  /* a live object: rewritten before the call, original sees it, registers unchanged */
+  map_at(OBJ,MAPD,VT); call(OBJ,3);
+  CHECK(rec[3].n==1 && rec[3].x[0]==OBJ && rec[3].x[1]==0x11 && rec[3].val_seen==KEY && gr64(MAPD+8)==KEY,"live object rewritten");
+  /* an object of another class through the same shared virtual: called, nothing written */
+  call(OTHER,3);
+  CHECK(rec[3].n==2 && rec[3].x[0]==OTHER && rec[3].val_seen==VAL && !memcmp(GP(OTHER),other,0x78) && !memcmp(GP(OTHERD),odata,24),
+        "unrelated object unchanged");
+  /* an empty map (the call before the properties are read): nothing written; a non-object receiver (NULL, misaligned) only calls */
+  map_at(OBJ,MAPD,VT); put32(OBJ+0x30,0); call(OBJ,3); CHECK(rec[3].n==3 && gr64(MAPD+8)==VAL,"empty map untouched");
+  call(0,3); call(OBJ+4,3); CHECK(rec[3].n==5 && g_locked==0,"non-object receivers called through");
+  /* an entry that is not in the table: nothing called */
+  { static CPU c; memset(&c,0,sizeof c); c.x[0]=OBJ; int before_n=rec[3].n+rec[2].n; ei_virtual(&c,CODE_LO+0x40);
+    CHECK(rec[3].n+rec[2].n==before_n,"unknown entry"); }
+}
 static GuestFn disp[0x20];
 static u64 run(int a,int b,int c3,int want,int hooked){
   static CPU c; memset(&c,0,sizeof c); c.mem=g_mem; c.disp=disp; c.code_lo=BASE; c.code_hi=BASE+0x80;
@@ -126,6 +184,7 @@ int main(void){
   /* a target of another class: nothing written */
   put32(o+0x50,1); put64(0x500,0x777);
   ch=ei_clear(o); CHECK(ch==0 && gr64(0x208)==0x500,"different classes: changed %d",ch);
+  ei_tests();
   if(fails){ printf("%d failed\n",fails); return 1; }
   printf("ok\n"); return 0;
 }
@@ -150,6 +209,13 @@ class ButtonLayoutRuntimeTests(unittest.TestCase):
 
     def test_hook_reached_from_generated_code_with_fallbacks(self):
         r = self.build_and_run(True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_redirect_wrapper_rewrites_before_the_call_and_reads_nothing_after(self):
+        r = self.build_and_run(True)
+        for name in ('install:', 'original called once', 'rewritten before the original', 'guest reads after the object was retired',
+                     'map structure kept', 'live object rewritten', 'unrelated object unchanged', 'empty map', 'non-object'):
+            self.assertNotIn('FAIL: ' + name, r.stdout)
         self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_direct_generated_call_bypasses_the_hook(self):

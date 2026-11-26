@@ -84,7 +84,13 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   element, both must be objects of the same class); count, free list and hash are unchanged. Live elements come from the allocation
   flags: the TBitArray's heap pointer (+0x48) whenever it is set, else its four inline words (+0x38), whatever the bit count.
 - Lifetime: vtable slots 0 / 1 (main+0x1684900 complete, 0x16849b0 deleting destructor, which frees the object) are not wrapped;
-  the wrapper acts only when the object is a platform data object both when the call starts and after it returns.
+  the wrapper rewrites the map BEFORE calling the original, while the caller still holds its receiver, and reads nothing after the
+  original returns (a callee that retires or frees the object cannot make it touch a dead object); the original gets the registers
+  unchanged. Tested on the real install path (`ei_wrap_vtable`) with a callee that retires the object (tests/test_button_layout.py).
+  Not shown yet: that the pre-call rewrite catches the maps as early as the post-call one did (the first virtual call after the
+  properties are read must come before Enhanced Input reads the map). PC check: the "N Switch mapping context redirects ... now keep
+  the PC contexts" log line once the lobby loads, and the bottom button accepting in the lobby. If it does not show, the fallback is
+  a verified PostLoad-only hook (not built).
 
 ## Performance: the icon scan (parent's measurement, 2026-11-26)
 - With `button_layout=playstation` the once-a-second whole-memory scan under the memory lock gives repeatable frame spikes at 1800p

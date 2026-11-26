@@ -68,7 +68,7 @@ enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
 int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx);
 int mem_span_ok_locked(u64 addr, u64 size, u32 perm);   /* inside mem_with_range only */
-#include "orbitals_buttons.h"   /* ei_clear, icon_lookup */
+#include "orbitals_buttons.h"   /* ei_clear, ei_virtual / ei_wrap_vtable, icon_lookup */
 /* Button icons: DA_PlatformInputIcons (UMoreporkInputIconDataAsset) keeps InputIcons, a TMap<FKey, entry> (0x70-byte elements at
    +0x30) whose entry holds a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2, Switch 3; 0x18-byte elements: key
    byte, texture at +8). Every lookup goes through one native function, main+0x40c5ce0 (asset, const FKey*, EPlatformType, UTexture2D**
@@ -97,24 +97,6 @@ static void icon_install(const SwrModInfo* mod){
   g_icon_want= g_layout==1? 2 : 1;
   icon_lookup_orig=*e; *e=icon_lookup;
   LOG("Orbitals: button icons: %s icons (icon lookup main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_LOOKUP);
-}
-/* The redirect maps are rewritten before their first use: the virtual functions the object's vtable reaches (UObject's own, shared
-   with other classes) go through a wrapper that, once the call returns, rewrites the map of the UEnhancedInputPlatformData it was
-   called on. The loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads
-   the map. Lifetime: slots 0 and 1 are the class's complete and deleting destructors (main+0x1684900 / 0x16849b0, the only two
-   entries no other vtable shares; the deleting one frees the object), so they are never wrapped; every other virtual function
-   leaves its object alive. The object must already be a platform data object when the call starts, and still be one after it. */
-enum { EI_SLOTS=64, EI_FIRST_SLOT=2 };
-static struct { u64 pc; GuestFn orig; } g_eiw[EI_SLOTS]; static int g_neiw;
-static void ei_clear_cb(u64 a, u64 n, void* ctx){ (void)n; (void)ctx; ei_clear(a); }
-static int ei_is_data(u64 obj){ return obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable; }
-static void ei_virtual(CPU* c, u64 entry){
-  u64 obj=c->x[0];
-  GuestFn orig=NULL; for(int i=0;i<g_neiw;i++) if(g_eiw[i].pc==entry){ orig=g_eiw[i].orig; break; }
-  if(!orig) return;
-  int mine=ei_is_data(obj);
-  orig(c,entry);
-  if(mine && ei_is_data(obj) && gr32(obj+0x30)) mem_with_range(obj,0x78,ei_clear_cb,NULL);
 }
 /* The platform's accept / back keys. Unreal builds EKeys::Virtual_Accept = FPlatformInput::GetGamepadAcceptKey() and Virtual_Back =
    GetGamepadBackKey() as copies of two face button FKeys at the end of the EKeys static initializer (main+0x50dc00, called once from
@@ -159,18 +141,7 @@ static void ei_install(const SwrModInfo* mod){
   if(!g_accept_bottom) return;
   ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;
-  u64 dtor[2]={0,0};
-  for(int i=0;i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
-    u64 slot=g_ei_vtable+8ull*i; if(!guest_span_readable(slot,8,8)) break;
-    u64 fn=gr64(slot); if(fn<mod->size) fn+=mod->base;   /* the game's own loader relocates its data later: still module offsets here */
-    if(fn<g_code_lo || fn>=g_code_hi || (fn&3)) break;   /* past the end of the vtable */
-    if(i<EI_FIRST_SLOT){ dtor[i]=fn; continue; }   /* the destructors */
-    if(fn==dtor[0] || fn==dtor[1]) continue;
-    int dup=0; for(int k=0;k<g_neiw;k++) if(g_eiw[k].pc==fn) dup=1;
-    GuestFn* e=&g_disp[(fn-g_code_lo)/4];
-    if(dup || !*e || *e==ei_virtual) continue;
-    g_eiw[g_neiw].pc=fn; g_eiw[g_neiw].orig=*e; g_neiw++; *e=ei_virtual;
-  }
+  ei_wrap_vtable(g_ei_vtable,mod->base,mod->size,g_code_lo,g_code_hi,g_disp);
   LOG("Orbitals: button layout: %d virtual functions of the input platform data watched (vtable %llx: %llx %llx, code %llx-%llx)\n",g_neiw,
       (unsigned long long)g_ei_vtable,(unsigned long long)gr64(g_ei_vtable),(unsigned long long)gr64(g_ei_vtable+8),(unsigned long long)g_code_lo,(unsigned long long)g_code_hi);
 }
