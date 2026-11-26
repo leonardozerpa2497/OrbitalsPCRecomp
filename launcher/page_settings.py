@@ -152,9 +152,13 @@ class ControlsPage(SettingsPage):
         self.scan_row = rows.action("Connected controllers", "Scan again", self.scan, lambda: self.found, enabled=free)
         if WINDOWS:
             rows.switch("Controller vibration", describe="Rumble, on controllers that have it.", enabled=free, **setting("vibration"))
-        rows.choice("Button layout", tuple(BUTTON_LAYOUTS), enabled=free, **setting("button_layout"),
-                    describe="Accept and back buttons and the button icons in the game. Nintendo: accept on the right button, as on the "
-                             "Switch 2. Xbox / PlayStation: accept on the bottom button, with that controller's icons.")
+        rows.choice("Button icons", tuple(BUTTON_LAYOUTS), enabled=free, **setting("button_layout"),
+                    describe="The controller drawn in the game's button prompts. The buttons keep their places: accept stays on the "
+                             "right button (Circle / B), and the icons show it.")
+        rows.switch("Accept with the bottom button", enabled=lambda: free() and self.app.settings()["button_layout"] != "Nintendo",
+                    **setting("button_accept_bottom"),
+                    describe="Experimental: Cross / A accepts and Circle / B goes back in the lobby, the pause menu and in game, as in the "
+                             "PC version. The title screen and the main menu still accept with the right button.")
         rows.group("Gyro aiming")
         gyro_on = lambda: free() and self.app.settings()["gyro"] != "Off"
         rows.choice("Gyro aiming", tuple(GYRO_MODES), enabled=free, **setting("gyro"),

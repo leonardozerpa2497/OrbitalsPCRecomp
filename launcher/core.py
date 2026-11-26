@@ -42,7 +42,7 @@ DEFAULT_SETTINGS = {
     "upscale": "Standard", "vsync": True, "volume": 100, "keyboard": 1,
     "mouse_camera": None, "mouse_sensitivity": None, "vibration": True,
     "fps": "30 (reference)", "gfx_preset": "High", "tv_resolution": "1080p (console)",
-    "button_layout": "Nintendo", "gyro": "Off", "gyro_sensitivity_x": 1.5, "gyro_sensitivity_y": 1.5,
+    "button_layout": "PlayStation", "button_accept_bottom": False, "gyro": "Off", "gyro_sensitivity_x": 1.5, "gyro_sensitivity_y": 1.5,
     "gyro_button": "Touchpad click", "gyro_button_mode": "Hold to pause", "gyro_calibrate": False,
 }
 # Orbitals.ini values of the controls settings; Nintendo is the game as it is.
@@ -791,7 +791,7 @@ def validate_settings(settings):
             or settings["gyro_button"] not in GYRO_BUTTONS or settings["gyro_button_mode"] not in GYRO_BUTTON_MODES
             or any(type(settings[key]) not in (int, float) or settings[key] not in GYRO_SENSITIVITIES
                    for key in ("gyro_sensitivity_x", "gyro_sensitivity_y"))
-            or type(settings["gyro_calibrate"]) is not bool):
+            or type(settings["gyro_calibrate"]) is not bool or type(settings["button_accept_bottom"]) is not bool):
         raise LauncherError("A profile setting is invalid.")
     try:
         graphics.validate(graphics_settings(settings))
@@ -1158,13 +1158,13 @@ def launch(game, profiles):
         ini = game.root / "Orbitals.ini"
         text = ini.read_text(encoding="utf-8-sig", errors="replace") if ini.is_file() else ""
         fps = graphics.FPS_MODES[settings["fps"]]
-        keys = ("ue_fps", "display_resolution", "button_layout", "gyro", "gyro_sensitivity_x", "gyro_sensitivity_y", "gyro_button",
+        keys = ("ue_fps", "display_resolution", "button_layout", "button_accept_bottom", "gyro", "gyro_sensitivity_x", "gyro_sensitivity_y", "gyro_button",
                 "gyro_button_mode", "gyro_calibrate")
         text = re.sub(rf"(?m)^\s*({'|'.join(keys)})\s*=.*$", "", text)
         tv = graphics.TV_RESOLUTIONS[settings["tv_resolution"]]
         text = text.rstrip() + f"\nue_fps={fps}\n" + (f"display_resolution={tv}\n" if tv else "")
         if layout := BUTTON_LAYOUTS[settings["button_layout"]]:
-            text += f"button_layout={layout}\n"
+            text += f"button_layout={layout}\n" + ("button_accept_bottom=1\n" if settings["button_accept_bottom"] else "")
         calibrate = settings["gyro"] != "Off" and settings["gyro_calibrate"]
         if settings["gyro"] != "Off":
             text += (f"gyro={GYRO_MODES[settings['gyro']]}\ngyro_sensitivity_x={settings['gyro_sensitivity_x']:.2f}\n"
