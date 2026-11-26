@@ -17,7 +17,9 @@ Extra polls do not publish HID, run scripts or drive settings; focus is checked 
 It adds no interpolation or smoothing delay. Long frontend work and Bluetooth/device batching can still cause gaps.
 The deterministic independent-clock test reproduces empty camera frames at the old delivery cadence and rejects them with
 the new scheduler; this is a model, not a claim that Bluetooth hardware has been measured at 500 Hz.
-Rollback: Gyro Off disables the extra polling; revert the follow-up commit to restore the old delivery cadence with gyro on.
+Rollback: Gyro Off with calibration/test/log diagnostics also off disables the extra polling; revert the follow-up commits
+to restore the old delivery cadence with gyro on. The real-pad L+R+Plus settings chord suppresses intermediate batches before
+the next normal poll opens the panel. The headless backend has a no-op motion poll.
 
 ## Settings (Orbitals.ini, launcher Controls page)
 | key | values | default |

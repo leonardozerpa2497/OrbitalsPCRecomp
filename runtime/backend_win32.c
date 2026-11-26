@@ -564,7 +564,11 @@ static void gyro_poll_devices(const WinGamepad* devices, int allowed){
 void video_motion_poll(void){
   WinGamepad devices[WIN_GAMEPAD_SLOTS];
   win_gamepads_poll(devices);
-  gyro_poll_devices(devices,gyro_input_allowed && GetForegroundWindow()==g_hwnd && !g_controls_open && !settings_open());
+  int allowed=gyro_input_allowed && GetForegroundWindow()==g_hwnd && !g_controls_open && !settings_open();
+  /* Suppress the batch as soon as the real-pad settings chord is held; video_poll still owns opening the panel. */
+  const u64 chord=(1ull<<6)|(1ull<<7)|(1ull<<10); /* L + R + Plus, as in settings_controller */
+  for(int i=0;i<WIN_GAMEPAD_SLOTS;i++) if((devices[i].pad.buttons&chord)==chord) allowed=0;
+  gyro_poll_devices(devices,allowed);
 }
 
 void video_poll(void){
