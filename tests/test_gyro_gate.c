@@ -285,6 +285,44 @@ static void test_controller_change_drops_synthetic_turn(void){   /* the ended te
   CHECK(cam_yaw(2) == 0, "the synthetic turn reached the new controller: %.4f deg", cam_yaw(2));
   ended_for_good("controller change while running");
 }
+static void test_end_inside_last_due_sample(void){   /* the end lands in the last due sample: the loop exits without a state check */
+  reset(); G.mode = 0; T.state = 1;
+  frames(200, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  clock_ns = T.next_sample;  /* exactly one sample due */
+  double before = cam_yaw(0); int calls = add_calls;
+  abort_countdown = 2;       /* inside that sample, after the game thread could have ended the test and drained Acc */
+  orbitals_gyro_pad(0, 100, 0x054c, 0x0ce6, 0, 0, NULL, 0, 1, 1);
+  CHECK(abort_countdown == 0 && T.state == 4, "state %d countdown %d", T.state, abort_countdown);
+  CHECK(Acc[0].yaw == 0 && Acc[0].pitch == 0, "the last sample published after the end: yaw %.6f pitch %.6f", Acc[0].yaw, Acc[0].pitch);
+  clock_ns += 16000000ull; tick(0, 0.016f);
+  CHECK(add_calls == calls && cam_yaw(0) == before, "camera turned %.6f deg after the end (%d AddInput calls)", cam_yaw(0) - before, add_calls - calls);
+  ended_for_good("end inside the last due sample");
+}
+static void test_end_after_publication_clears_it(void){   /* the turn published before a post-UpdateRotation end is dropped */
+  reset(); G.mode = 0; T.state = 1;
+  frames(200, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  clock_ns += 8000000ull; orbitals_gyro_pad(0, 100, 0x054c, 0x0ce6, 0, 0, NULL, 0, 1, 1);
+  CHECK(Acc[0].yaw != 0, "no synthetic turn waiting");
+  test_lock(); test_inconclusive("simulated end after UpdateRotation"); test_unlock();
+  CHECK(Acc[0].yaw == 0 && Acc[0].pitch == 0, "the waiting synthetic turn survived the end: %.6f", Acc[0].yaw);
+  double before = cam_yaw(0); clock_ns += 16000000ull; tick(0, 0.016f);
+  CHECK(cam_yaw(0) == before, "camera turned %.6f deg after the end", cam_yaw(0) - before);
+  ended_for_good("end after a publication");
+}
+static void test_end_matrix(void){   /* running and settling x closed gate, gap, new controller: INCONCLUSIVE for good */
+  for(int state = 2; state <= 3; state++) for(int kind = 0; kind < 3; kind++){
+    reset(); G.mode = 0; T.state = 1;
+    for(int k = 0; k < 400 && T.state != state; k++) frame(1, 0.016f);
+    CHECK(T.state == state, "matrix preparation %d", state);
+    if(kind == 0){ ignore_close(); tick(0, 0.016f); ignore_open(); }
+    if(kind == 1){ clock_ns += 100000001ull; tick(0, 0.016f); }
+    if(kind == 2){ make_pc(2, 0); tick(2, 0.016f); }
+    CHECK(T.state == 4 && logged("INCONCLUSIVE"), "matrix end state %d kind %d", state, kind);
+    ended_for_good("matrix");
+  }
+}
 
 int main(void){
   g_mem = calloc(1, MEM);
@@ -314,6 +352,9 @@ int main(void){
   test_end_during_synthetic_sample_stays();
   test_end_inside_sample_late_in_loop();
   test_controller_change_drops_synthetic_turn();
+  test_end_matrix();
+  test_end_inside_last_due_sample();
+  test_end_after_publication_clears_it();
   printf(failures ? "%d FAILED\n" : "all gyro gate tests passed\n", failures);
   return failures != 0;
 }

@@ -335,6 +335,14 @@ static struct {
 static void test_lock(void){ while(__atomic_exchange_n(&T.lock,1,__ATOMIC_ACQUIRE)) {} }
 static void test_unlock(void){ __atomic_store_n(&T.lock,0,__ATOMIC_RELEASE); }
 
+static void acc_add(int s, u64 now, double dyaw, double dpitch){
+  acc_lock(s);
+  u64 taken=__atomic_load_n(&Acc[s].taken_ns,__ATOMIC_RELAXED);   /* the game thread may have taken it after now was read */
+  if(now>taken && now-taken>100000000ull){ Acc[s].yaw=0; Acc[s].pitch=0; }   /* nobody looking: drop it */
+  Acc[s].yaw+=dyaw; Acc[s].pitch+=dpitch;
+  acc_unlock(s);
+}
+
 static void gyro_sample(int s, GyroPad* g, const PadMotion* m, int synthetic, int active, int manual_hold){
   u64 dt_ns= g->last_t && m->t_ns>g->last_t? m->t_ns-g->last_t : 0;
   g->last_t=m->t_ns;
@@ -375,12 +383,14 @@ static void gyro_sample(int s, GyroPad* g, const PadMotion* m, int synthetic, in
   double dyaw=-yd*dt*G.sens_x, dpitch=pd*dt*G.sens_y;
   if(G.invert&1) dyaw=-dyaw;
   if(G.invert&2) dpitch=-dpitch;
-  if(synthetic){ test_lock(); T.want_yaw+=dyaw; T.want_pitch+=dpitch; test_unlock(); }
-  acc_lock(s);
-  u64 now=plat_ns();
-  if(now-__atomic_load_n(&Acc[s].taken_ns,__ATOMIC_RELAXED)>100000000ull){ Acc[s].yaw=0; Acc[s].pitch=0; }   /* nobody looking: drop it */
-  Acc[s].yaw+=dyaw; Acc[s].pitch+=dpitch;
-  acc_unlock(s);
+  u64 now=plat_ns();   /* read before any lock: no clock read ever happens under test_lock or an Acc lock */
+  if(!synthetic){ acc_add(s,now,dyaw,dpitch); return; }
+  /* a synthetic sample is counted and published in one test_lock section (lock order test_lock -> Acc, the only nesting), and
+     only while the test still runs on this slot: a game-thread end comes either before it (the sample is refused) or after it
+     (test_inconclusive clears this Acc under the same lock), so an ended test never leaves a synthetic turn behind */
+  test_lock();
+  if(T.state==2 && T.slot==s){ T.want_yaw+=dyaw; T.want_pitch+=dpitch; acc_add(s,now,dyaw,dpitch); }
+  test_unlock();
 }
 
 void orbitals_gyro_pad(int s, u32 id, u16 vendor, u16 product, u32 buttons, u16 zl, const PadMotion* m, int n, int has_gyro, int allowed){
@@ -486,7 +496,8 @@ static int gyro_gate(u64 pc, float dt, GateSeen* q){
    and since when its gate has been open without a break (no close, no UpdateRotation gap over 100 ms, the same controller) */
 static struct { u64 pc; int reason, logged; u64 last_ns, open_since, drop_t0; double drop_yaw, drop_pitch; } Gs[SLOTS];
 
-static void test_inconclusive(const char* why){   /* under test_lock */
+static void test_inconclusive(const char* why){   /* under test_lock; the waiting turn of a running test is dropped (test_lock -> Acc) */
+  if(T.state==2 || T.state==3) acc_clear(T.slot);
   T.state=4; LOG("gyro test: INCONCLUSIVE (%s); no result\n",why);
 }
 
@@ -549,12 +560,13 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   }
   orig(c,entry);
   if(!measure) return;
+  u64 after=plat_ns();
   test_lock();
   if(T.state!=2 && T.state!=3){ test_unlock(); return; }   /* ended inside (a nested UpdateRotation) */
   if(!guest_span_readable(pc+PC_CONTROL_ROTATION,16,8)){ test_inconclusive("ControlRotation unreadable after UpdateRotation"); test_unlock(); return; }
   double dp=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION)-cp0), dy=wrap180(*(double*)GP(pc+PC_CONTROL_ROTATION+8)-cy0);
   T.cam_pitch+=dp; T.cam_yaw+=dy;
-  if(T.state==3 && plat_ns()-T.t0>300000000ull){
+  if(T.state==3 && after-T.t0>300000000ull){
     T.state=4;
     double ey= T.want_yaw? 100.0*(T.cam_yaw-T.want_yaw)/T.want_yaw : 0, ep= T.want_pitch? 100.0*(T.cam_pitch-T.want_pitch)/T.want_pitch : 0;
     LOG("gyro test: yaw integral x sensitivity %.3f deg, applied %.3f, camera turned %.3f (%+.2f%%) -> %s\n",T.want_yaw,T.applied_yaw,T.cam_yaw,ey,fabs(ey)<=2? "PASS" : "FAIL");

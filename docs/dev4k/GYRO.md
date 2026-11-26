@@ -74,9 +74,14 @@ until it is moved out.
   same player (2.4 s old + 0.8 s new), and is per player (a closed P2 does not hold P1 back); a pause while running or settling
   ends INCONCLUSIVE; a game-thread end landing while the frontend thread is inside a synthetic sample (test_lock let go; a clock
   hook in the test places it deterministically, first sample or a later one) stays INCONCLUSIVE, stops the generator there and
-  its turn never reaches the camera, nor a new controller's. The earlier build fails 15 checks of these. Mutations (gate always
+  its turn never reaches the camera, nor a new controller's, also when it lands in the last due sample (the loop exits without
+  another state check); a turn published just before an end is dropped by that end. A synthetic sample is counted and published
+  to the waiting turn in one test_lock section, only while the test still runs on its slot, and every INCONCLUSIVE end clears
+  that slot's waiting turn under the same lock (lock order test_lock -> Acc; no clock read under either lock). The earlier build
+  fails 15 checks of these. Mutations (gate always
   open, closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE, no relock check, no window reset on a
-  gap or a new controller, no abort on a gap, no drop of the ended test's turn) each fail at least one test.
+  gap or a new controller, no abort on a gap, no drop of the ended test's turn, no running check at publication, no clear at an
+  INCONCLUSIVE end) each fail at least one test.
 - Synthetic test and the gate: it starts only after 3 s of continuous open gate on one player's controller (the 3 s start over
   whenever it closes, UpdateRotation stops for over 100 ms or another controller takes the player); once it runs, any such break
   logs `gyro test: INCONCLUSIVE (...)`, gives no result, drops the waiting synthetic turn and cannot be resumed.
