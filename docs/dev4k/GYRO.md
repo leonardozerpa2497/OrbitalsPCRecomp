@@ -50,6 +50,13 @@ the screenshots show their characters inside the ship. At264.74s player1 closes 
 ViewTarget=MainCharacter; at280.49s it reopens with the same relationship and pause0. Player2's UpdateRotation pauses.
 The diagnostic logs only changes of controller or gate reason, so a ship-to-foot transition that stays open does not
 produce its own line. This is a gate/pause observation, not a synthetic on-foot camera-result claim.
+
+**Final on-foot synthetic check, run20261126-121733-b70975c9:** final runtime with the ineffective controller-art
+probe reverted and the prior two-route code module restored. Both players leave their seats and jump with the bottom
+button. With delay170, ControllerId0 starts at170.42s and reports at172.73s: yaw−134.460°, pitch45.000°, both0.00% error.
+`final-ps-camera-before_s.png` and `final-ps-camera-after_s.png` visibly show only P1's view rotate inside the ship;
+P2's view remains pointed toward the door. Evidence: `/tmp/claude-1000/bench/final-ps-onfoot/Orbitals.log`.
+This functional run is not a performance comparison: jumping, exiting seats and the synthetic camera turn change the scene.
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is

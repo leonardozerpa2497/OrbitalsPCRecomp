@@ -83,6 +83,8 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   exits both ship seats; bottom-button presses make both characters jump (`xbox-both-jumping_s.png`).
   Pause and right-button return also work on foot (`xbox-onfoot-paused_s.png`, `xbox-onfoot-resumed_s.png`).
   This does not exhaust every gameplay interaction.
+  PlayStation repeats both seat exits and both bottom-button jumps in final run20261126-121733-b70975c9,
+  after the artwork probe was reverted (`final-ps-onfoot-before_s.png`, `final-ps-both-jumping_s.png`).
 
 ## Controller artwork limitation (observed on the PC)
 
