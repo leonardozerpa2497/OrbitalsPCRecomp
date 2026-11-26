@@ -565,7 +565,7 @@ int swr_main(int argc, char** argv){
   /* 60Hz frontend loop */
   u64 next=plat_ns(); int tick=0;
   while(!g_quit){
-    video_poll(); hid_update(); vsync_tick_vt(); orbitals_scene_poll();
+    video_poll(); hid_update(); vsync_tick_vt(); orbitals_scene_poll(); { extern void orbitals_res_probe(void); orbitals_res_probe(); }
 #if defined(SWR_RECORD_AUDIO)
     {extern void rec_watchdog(void); rec_watchdog(); }
 #endif

@@ -93,8 +93,8 @@ static int am_csg(SvcObj* o, IpcCtx* c){           /* ICommonStateGetter */
       u32 m=g_msgq[0]; memmove(g_msgq,g_msgq+1,(--g_nmsg)*4); if(!g_nmsg) g_msg_event->signaled=0; pm_unlock(&g_klock);
       { static int nl; if(nl<16){ nl++; LOG("applet: message %u delivered (%d left)\n",m,g_nmsg); } }
       out32(c,m); return 0; }
-    case 5: out8(c,(u8)g_opt_docked); return 0;                      /* GetOperationMode */
-    case 6: out32(c,(u32)g_opt_docked); return 0;                    /* GetPerformanceMode */
+    case 5: { extern void swr_nvn_backtrace(const char*); swr_nvn_backtrace("[trace] GetOperationMode"); } out8(c,(u8)g_opt_docked); return 0;   /* GetOperationMode */
+    case 6: { extern void swr_nvn_backtrace(const char*); swr_nvn_backtrace("[trace] GetPerformanceMode"); } out32(c,(u32)g_opt_docked); return 0;   /* GetPerformanceMode */
     case 8: out8(c,0); return 0;                                     /* GetBootMode */
     case 9: out8(c,1); return 0;                                     /* GetCurrentFocusState: InFocus */
     case 13: out_copy_h(c,ev_handle(kevent_new("sleep lock",0))); return 0;

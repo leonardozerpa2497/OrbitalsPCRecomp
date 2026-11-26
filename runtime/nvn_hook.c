@@ -227,6 +227,14 @@ const char* swr_nvn_log_dir(void){ static char p[1200]; if(!p[0]) snprintf(p,siz
 void swr_nvn_vi_crop(int c[4]){ extern volatile i32 g_vi_crop[4]; for(int i=0;i<4;i++) c[i]=g_vi_crop[i]; }
 void* swr_nvn_cur_cpu(void){ KThread* t=kthread_cur(); return t? (void*)&t->cpu : NULL; }
 u64 swr_nvn_guest_ns(void){ extern u64 guest_ns(void); return guest_ns(); }
+/* experiment (display-4k): the guest frame chain of the current NVN call, as offsets in the main module */
+void swr_nvn_backtrace(const char* tag){
+  KThread* t=kthread_cur(); if(!t) return; CPU* c=&t->cpu; u64 base=0;
+  for(u32 i=0;i<g_mod->nmods;i++) if(!strcmp(g_mod->mods[i].name,"main")) base=g_mod->mods[i].base;
+  char b[1400]; int n=snprintf(b,sizeof b,"%s x0-3 %llx %llx %llx %llx lr %llx |",tag,(unsigned long long)c->x[0],(unsigned long long)c->x[1],(unsigned long long)c->x[2],(unsigned long long)c->x[3],(unsigned long long)(c->x[30]-base));
+  u64 fp=c->x[29];
+  for(int k=0;k<28 && fp && guest_span_readable(fp,16,8) && n<(int)sizeof b-24;k++){ u64 nfp=gr64(fp), lr=gr64(fp+8); n+=snprintf(b+n,sizeof b-n," %llx",(unsigned long long)(lr-base)); if(nfp<=fp) break; fp=nfp; }
+  LOG("%s\n",b); }
 void swr_nvn_symbol(u64 a, char* out, size_t n){ snprintf(out,n,"%llx",(unsigned long long)a); }
 #define RETURN_TO_HOST 0xFFFFFFFFFFFF0000ull
 /* a guest function on this thread's CPU. Its ret leaves pc at the sentinel; anything else that comes back (a longjmp, a tail through the trampoline) goes round the loop as in thread_body */
