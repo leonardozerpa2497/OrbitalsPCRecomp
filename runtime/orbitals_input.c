@@ -181,8 +181,9 @@ static void ei_install(const SwrModInfo* mod){
    The camera turns in the engine, by the angle the controller turned (no simulated stick): APlayerController::UpdateRotation, called
    by every local player controller once a frame (also without a pawn, at the title and in menus), first gets the gyro turn through
    the engine's own AddYawInput / AddPitchInput, then the frame turns by RotationInput as for the stick, which keeps working at the
-   same time. A gate (gyro_gate) lets it through only while the controller looks through its own acknowledged pawn with look input
-   not ignored; otherwise the turn is dropped. While the game is paused UpdateRotation does not run; the turn from before a pause is
+   same time. A gate (gyro_gate) lets it through only while a game player controller looks through the actor it controls (its ship
+   station or its character), look input not ignored, no cinematic and the shared game pause off; otherwise the turn is dropped. While
+   the game is paused UpdateRotation usually does not run, and the gate is closed if it does; the turn from before a pause is
    dropped, so nothing jumps after it.
    Samples: every SDL sensor sample of the pad, integrated with its own timestamp (frame rate independent); player space yaw (GyroWiki,
    relax factor 1.41) from the gravity the accelerometer sees; tightening under gyro_tightening deg/s; automatic calibration when the pad
@@ -493,33 +494,105 @@ static int pc_controller_id(u64 pc){
 }
 static double wrap180(double d){ while(d>180) d-=360; while(d<-180) d+=360; return d; }
 
-/* The gate: the gyro turns a player controller only while it is plainly looking through its own pawn. UpdateRotation also runs
-   without one (PlayerTick calls it while the controller is Inactive: the title and menus), so its call alone proves nothing. Read
-   before the game's UpdateRotation runs, only from the controller and its camera manager (the pawn and view target are compared as
-   pointers, never read): a pawn (an untagged pointer) that the controller acknowledged, look input not ignored, a camera manager
-   whose view target is that pawn and that is not blending to another actor, and a frame that moves (DeltaTime > 0). Anything
-   unreadable closes it. A closed gate still takes the turn waiting for the player and drops it, so nothing builds up meanwhile. */
-enum { PC_PAWN=0x2e8, PC_IGNORE_LOOK=0x33a, PC_ACK_PAWN=0x358, PC_CAMERA_MANAGER=0x368, PCM_VIEW_TARGET=0x340, PCM_PENDING_VIEW_TARGET=0xc00 };
-enum { GATE_OPEN, GATE_UNREADABLE, GATE_NO_PAWN, GATE_TAGGED, GATE_NOT_ACKNOWLEDGED, GATE_IGNORE_LOOK, GATE_NO_CAMERA,
-       GATE_VIEW_TARGET, GATE_PENDING_VIEW_TARGET, GATE_NO_TIME };
-static const char* const gate_reason[]={"open","controller unreadable","no pawn","tagged pawn pointer","pawn not acknowledged",
-  "look input ignored","camera manager missing or unreadable","view target is not the pawn","blending to another view target",
-  "DeltaTime 0"};
-typedef struct { u64 pawn, ack, pcm, vt, pending; int ignore; } GateSeen;
+/* The gate: the gyro turns a player controller only while that player plainly looks through the actor it controls itself.
+   UpdateRotation also runs without one (PlayerTick calls it while the controller is Inactive: the title and menus), so its call
+   alone proves nothing, and in this game the camera of a player at the helm is a separate controlled actor, not the pawn (PC run,
+   docs/dev4k/GYRO.md). Read before the game's UpdateRotation runs (offsets: offline RE of main, checked against live snapshots):
+   - the controller is an OrbBasePlayerController (native IsA on the existing class singleton; the title's OrbFrontEndPlayerController
+     is 0x750 bytes, so none of the game fields below is read before this holds);
+   - a pawn (an untagged pointer) that the controller acknowledged, look input not ignored, cinematic mode (+0x4c0 bit 0x02) off;
+   - the game's GetControlledActor (main+0x45144c0): ControlledActor (+0x7c8) if set, else MainCharacter (+0x7b8, required). A
+     ControlledActor other than MainCharacter must be an OrbControllableActor whose controlling player controller (+0x2f0) is this one;
+   - the camera manager's view target is that actor and it is not blending to another actor;
+   - the shared pause of the world's game state is off: the controller's Outer chain (bounded, cycle checked) to its ULevel, the
+     level's OwningWorld (+0xc0), the world's GameState (+0x1d8), an OBGameStateBase whose pause byte (+0x42b) is 0. The pause menu
+     pointer (+0x880) is never used: only the player who paused has one, and it stays cached after the game resumes;
+   - a frame that moves (DeltaTime > 0).
+   Anything unreadable, malformed or of an unexpected type closes it. A closed gate still takes the turn waiting for the player and
+   drops it, so nothing builds up meanwhile. */
+enum { PC_PAWN=0x2e8, PC_IGNORE_LOOK=0x33a, PC_ACK_PAWN=0x358, PC_CAMERA_MANAGER=0x368, PCM_VIEW_TARGET=0x340, PCM_PENDING_VIEW_TARGET=0xc00,
+       OBJ_CLASS=0x10, OBJ_OUTER=0x20, CLASS_BASE_CHAIN=0x30, CLASS_BASE_DEPTH=0x38,
+       PC_CINEMATIC=0x4c0, PC_CINEMATIC_BIT=0x02, PC_MAIN_CHARACTER=0x7b8, PC_CONTROLLED_ACTOR=0x7c8, CA_CONTROLLER=0x2f0,
+       LEVEL_WORLD=0xc0, WORLD_GAME_STATE=0x1d8, GS_PAUSED=0x42b, GYRO_MAX_DEPTH=256, GYRO_MAX_OUTERS=32 };
+/* the class singletons (main module data, filled by the engine's StaticClass; only read here, never initialized) */
+enum { CLS_PLAYER_CONTROLLER, CLS_CONTROLLABLE_ACTOR, CLS_LEVEL, CLS_GAME_STATE, CLS_N };
+static const u32 cls_global[CLS_N]={0x9cb95d0,0x9cba540,0x9c51c88,0x9cb7bf0};   /* OrbBasePlayerController, OrbControllableActor, ULevel, OBGameStateBase */
+static u64 g_cls_slot[CLS_N];   /* their addresses in guest memory; 0 = gyro gate always closed */
+enum { GATE_OPEN, GATE_UNREADABLE, GATE_NOT_GAME_CONTROLLER, GATE_NO_PAWN, GATE_TAGGED, GATE_NOT_ACKNOWLEDGED, GATE_IGNORE_LOOK,
+       GATE_CINEMATIC, GATE_NO_MAIN_CHARACTER, GATE_CONTROLLED_ACTOR, GATE_WRONG_OWNER, GATE_NO_CAMERA, GATE_VIEW_TARGET,
+       GATE_PENDING_VIEW_TARGET, GATE_NO_GAME_STATE, GATE_PAUSED, GATE_NO_TIME };
+static const char* const gate_reason[]={"open","controller unreadable","not a game player controller","no pawn","tagged pawn pointer",
+  "pawn not acknowledged","look input ignored","cinematic mode","no main character","controlled actor not a controllable actor",
+  "controlled actor has another controller","camera manager missing or unreadable","view target is not the controlled actor",
+  "blending to another view target","game state not found","game paused","DeltaTime 0"};
+typedef struct { u64 pawn, ack, pcm, vt, pending, main, controlled, owner, gs; int ignore, cinematic, paused; } GateSeen;
+
+/* a plain object pointer: set, 8 aligned, no tag or high bits */
+static int gyro_ptr(u64 p){ return p && !(p&7) && p < (1ull<<48); }
+static int gyro_read64(u64 a, u64* v){
+  if(!gyro_ptr(a) || !guest_span_readable(a,8,8)) return 0;
+  *v=gr64(a); return 1;
+}
+/* the engine's UObject IsA (main+0x451d700): the object's class (+0x10) has the wanted class in its base chain: the chain array
+   (+0x30) entry at the wanted class's depth (+0x38, signed) is the wanted class's own chain struct (wanted class + 0x30, not the class).
+   The wanted class's own chain must name itself at its depth too, so a stale or wrong singleton never matches. */
+static int gyro_class_depth(u64 cls, u64* chain, i32* depth){
+  if(!gyro_ptr(cls) || !guest_span_readable(cls+CLASS_BASE_CHAIN,16,8)) return 0;
+  *chain=gr64(cls+CLASS_BASE_CHAIN); *depth=(i32)gr32(cls+CLASS_BASE_DEPTH);
+  return gyro_ptr(*chain) && *depth>=0 && *depth<=GYRO_MAX_DEPTH;
+}
+static int gyro_isa(u64 obj, int which){
+  u64 want, cls, wchain, chain, entry; i32 wd, d;
+  if(!gyro_read64(g_cls_slot[which],&want) || !gyro_class_depth(want,&wchain,&wd)) return 0;
+  if(!gyro_read64(wchain+(u64)wd*8,&entry) || entry!=want+CLASS_BASE_CHAIN) return 0;
+  if(!gyro_read64(obj+OBJ_CLASS,&cls) || !gyro_class_depth(cls,&chain,&d) || wd>d) return 0;
+  return gyro_read64(chain+(u64)wd*8,&entry) && entry==want+CLASS_BASE_CHAIN;
+}
+/* the shared pause: 1 paused, 0 running, -1 not found. Like AActor::GetWorld (GetTypedOuter<ULevel>, then OwningWorld). */
+static int gyro_paused(u64 pc, u64* gs_out){
+  u64 seen[GYRO_MAX_OUTERS], o, level=0, world, gs;
+  if(!gyro_read64(pc+OBJ_OUTER,&o)) return -1;
+  for(int n=0;n<GYRO_MAX_OUTERS && !level;n++){
+    if(!gyro_ptr(o)) return -1;
+    for(int k=0;k<n;k++) if(seen[k]==o) return -1;   /* a cycle */
+    seen[n]=o;
+    if(gyro_isa(o,CLS_LEVEL)) level=o;
+    else if(!gyro_read64(o+OBJ_OUTER,&o)) return -1;
+  }
+  if(!level || !gyro_read64(level+LEVEL_WORLD,&world) || !gyro_read64(world+WORLD_GAME_STATE,&gs)) return -1;
+  *gs_out=gs;
+  if(!gyro_isa(gs,CLS_GAME_STATE) || !guest_span_readable(gs+GS_PAUSED,1,1)) return -1;
+  return *GP(gs+GS_PAUSED)!=0;
+}
 static int gyro_gate(u64 pc, float dt, GateSeen* q){
   memset(q,0,sizeof *q);
   if(!guest_span_readable(pc+PC_PAWN,8,8) || !guest_span_readable(pc+PC_IGNORE_LOOK,1,1) || !guest_span_readable(pc+PC_ACK_PAWN,8,8)
      || !guest_span_readable(pc+PC_CAMERA_MANAGER,8,8)) return GATE_UNREADABLE;
   q->pawn=gr64(pc+PC_PAWN); q->ack=gr64(pc+PC_ACK_PAWN); q->ignore=*GP(pc+PC_IGNORE_LOOK); q->pcm=gr64(pc+PC_CAMERA_MANAGER);
-  int pcm_ok= q->pcm && !(q->pcm&1) && guest_span_readable(q->pcm+PCM_VIEW_TARGET,8,8) && guest_span_readable(q->pcm+PCM_PENDING_VIEW_TARGET,8,8);
+  int pcm_ok= gyro_ptr(q->pcm) && guest_span_readable(q->pcm+PCM_VIEW_TARGET,8,8) && guest_span_readable(q->pcm+PCM_PENDING_VIEW_TARGET,8,8);
   if(pcm_ok){ q->vt=gr64(q->pcm+PCM_VIEW_TARGET); q->pending=gr64(q->pcm+PCM_PENDING_VIEW_TARGET); }
+  if(!gyro_isa(pc,CLS_PLAYER_CONTROLLER)) return GATE_NOT_GAME_CONTROLLER;   /* before any game field */
+  if(!guest_span_readable(pc+PC_CINEMATIC,1,1) || !guest_span_readable(pc+PC_MAIN_CHARACTER,8,8)
+     || !guest_span_readable(pc+PC_CONTROLLED_ACTOR,8,8)) return GATE_UNREADABLE;
+  q->cinematic=*GP(pc+PC_CINEMATIC); q->main=gr64(pc+PC_MAIN_CHARACTER); q->controlled=gr64(pc+PC_CONTROLLED_ACTOR);
   if(!q->pawn) return GATE_NO_PAWN;
-  if(q->pawn&1) return GATE_TAGGED;
+  if(!gyro_ptr(q->pawn)) return GATE_TAGGED;
   if(q->ack!=q->pawn) return GATE_NOT_ACKNOWLEDGED;
   if(q->ignore) return GATE_IGNORE_LOOK;
+  if(q->cinematic&PC_CINEMATIC_BIT) return GATE_CINEMATIC;
+  if(!gyro_ptr(q->main)) return GATE_NO_MAIN_CHARACTER;
+  u64 actor= q->controlled? q->controlled : q->main;   /* GetControlledActor */
+  if(actor!=q->main){
+    if(!gyro_isa(actor,CLS_CONTROLLABLE_ACTOR)) return GATE_CONTROLLED_ACTOR;   /* before its controller field */
+    if(!gyro_read64(actor+CA_CONTROLLER,&q->owner)) return GATE_CONTROLLED_ACTOR;
+    if(q->owner!=pc) return GATE_WRONG_OWNER;
+  }
   if(!pcm_ok) return GATE_NO_CAMERA;
-  if(q->vt!=q->pawn) return GATE_VIEW_TARGET;
-  if(q->pending && q->pending!=q->pawn) return GATE_PENDING_VIEW_TARGET;
+  if(q->vt!=actor) return GATE_VIEW_TARGET;
+  if(q->pending && q->pending!=actor) return GATE_PENDING_VIEW_TARGET;
+  q->paused=gyro_paused(pc,&q->gs);
+  if(q->paused<0) return GATE_NO_GAME_STATE;
+  if(q->paused) return GATE_PAUSED;
   if(!(dt>0)) return GATE_NO_TIME;
   return GATE_OPEN;
 }
@@ -541,9 +614,11 @@ static void update_rotation(CPU* c, u64 entry, GuestFn orig){
   GateSeen q; int reason=gyro_gate(pc,dt,&q), open= reason==GATE_OPEN;
   u64 now=plat_ns();
   if(G.log && (!Gs[id].logged || Gs[id].pc!=pc || Gs[id].reason!=reason))
-    LOG("gyro gate: P%d controller %llx %s (%s): pawn %llx acknowledged %llx view target %llx pending %llx ignore look %d dt %.4f\n",
+    LOG("gyro gate: P%d controller %llx %s (%s): pawn %llx acknowledged %llx main %llx controlled %llx its controller %llx view target %llx"
+        " pending %llx ignore look %d cinematic %02x game state %llx paused %d dt %.4f\n",
         id+1,(unsigned long long)pc,open? "open" : "closed",gate_reason[reason],(unsigned long long)q.pawn,(unsigned long long)q.ack,
-        (unsigned long long)q.vt,(unsigned long long)q.pending,q.ignore,dt);
+        (unsigned long long)q.main,(unsigned long long)q.controlled,(unsigned long long)q.owner,(unsigned long long)q.vt,
+        (unsigned long long)q.pending,q.ignore,q.cinematic,(unsigned long long)q.gs,q.paused,dt);
   /* UpdateRotation stops while the game is paused (the paused tick skips PlayerTick): the turn waiting from before such a gap is
      dropped, as gyro_sample already drops one nobody took for 100 ms */
   u64 gap_ns= Gs[id].last_ns? now-Gs[id].last_ns : 0;
@@ -620,6 +695,7 @@ void orbitals_input_install(const SwrModInfo* mod){
   if(memcmp(mod->build_id,orbitals_build,sizeof orbitals_build)) return;
   ei_install(mod);
   g_add_yaw=mod->base+ADD_YAW; g_add_pitch=mod->base+ADD_PITCH;
+  for(int i=0;i<CLS_N;i++) g_cls_slot[i]=mod->base+cls_global[i];
   /* AddPitchInput / AddYawInput start with pacibsp; str d8, [sp, #-0x30]!; UpdateRotation with pacibsp; sub sp, sp, #0x90 and the
      game's override with ldrb w8, [x0, #0x73c] */
   if(gr32(g_add_yaw)!=0xd503237fu || gr32(g_add_yaw+4)!=0xfc1d0fe8u || gr32(g_add_pitch+4)!=0xfc1d0fe8u

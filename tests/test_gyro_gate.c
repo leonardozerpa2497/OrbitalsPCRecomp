@@ -17,11 +17,12 @@ void logf_(int level, const char* fmt, ...){
 }
 static int logged(const char* s){ return strstr(logbuf, s) != NULL; }
 
-/* guest memory: 1 MiB, one range can be made unreadable */
+/* guest memory: 1 MiB, one range can be made unreadable; any read of the watched range (memory past an object's end) is counted */
 enum { MEM = 1 << 20 };
-u8* g_mem; static u64 bad_lo, bad_hi;
+u8* g_mem; static u64 bad_lo, bad_hi, watch_lo, watch_hi; static int watch_hits;
 int guest_span_readable(u64 a, u64 n, u64 al){
   if(a + n > MEM || a + n < a || (al && a % al)) return 0;
+  if(a < watch_hi && a + n > watch_lo) watch_hits++;
   return a + n <= bad_lo || a >= bad_hi;
 }
 static u64 clock_ns;
@@ -55,14 +56,48 @@ static void fake_update_rotation(CPU* c, u64 e){
   rin_yaw[i] = rin_pitch[i] = 0;
 }
 
-/* controller i: ControllerId i, its own pawn, acknowledged, viewed through by its camera manager */
+/* The engine's class metadata as the game has it (main+0x451d700): an object's class at +0x10, its Outer at +0x20; a class's base
+   chain array at +0x30 lists the chain struct (class + 0x30) of every class from UObject down to itself, its depth (signed) at +0x38.
+   Each class here is a 0x100 block with its chain array at +0x80; the singletons the runtime reads are slots at 0x70000. */
+enum { K_OBJECT, K_ENGINE_PC, K_ORB_PC, K_BP_PC, K_FRONTEND_PC, K_ACTOR, K_CONTROLLABLE, K_SHIP_PILOT, K_SHIP_GUNNER, K_LEVEL, K_WORLD,
+       K_ENGINE_GS, K_OB_GS, K_BP_GS, K_PACKAGE, K_N };
+static const int k_parent[K_N] = { -1, K_OBJECT, K_ENGINE_PC, K_ORB_PC, K_ENGINE_PC, K_OBJECT, K_ACTOR, K_CONTROLLABLE, K_CONTROLLABLE,
+                                   K_OBJECT, K_OBJECT, K_ACTOR, K_ENGINE_GS, K_OB_GS, K_OBJECT };
+static u64 cls(int k){ return 0x60000 + (u64)k * 0x100; }
+static u64 chain_of(int k){ return cls(k) + 0x80; }
+static void make_classes(void){
+  memset(GP(0x60000), 0, 0x100 * K_N);
+  for(int k = 0; k < K_N; k++){
+    int d = 0;
+    for(int p = k_parent[k]; p >= 0; p = k_parent[p]) d++;
+    gw64(cls(k) + 0x30, chain_of(k)); gw32(cls(k) + 0x38, (u32)d);
+    for(int p = k, j = d; p >= 0; p = k_parent[p], j--) gw64(chain_of(k) + (u64)j * 8, cls(p) + 0x30);
+  }
+  static const int slot_class[CLS_N] = { K_ORB_PC, K_CONTROLLABLE, K_LEVEL, K_OB_GS };
+  for(int i = 0; i < CLS_N; i++){ g_cls_slot[i] = 0x70000 + (u64)i * 8; gw64(g_cls_slot[i], cls(slot_class[i])); }
+}
+static void object(u64 o, int k, u64 outer){ gw64(o + OBJ_CLASS, cls(k)); gw64(o + OBJ_OUTER, outer); }
+/* one world: the level (Outer of every actor) -> OwningWorld -> GameState (a Blueprint OBGameStateBase), not paused */
+enum { LEVEL = 0x71000, WORLD = 0x72000, GSTATE = 0x73000, OUTERS = 0x74000, CAMERA_ACTOR = 0x75000 };
+static void make_world(void){
+  object(WORLD, K_WORLD, 0); object(LEVEL, K_LEVEL, WORLD); gw64(LEVEL + LEVEL_WORLD, WORLD);
+  object(GSTATE, K_BP_GS, LEVEL); gw64(WORLD + WORLD_GAME_STATE, GSTATE); *GP(GSTATE + GS_PAUSED) = 0;
+  object(CAMERA_ACTOR, K_ACTOR, LEVEL);
+}
+/* controller i, as measured in the co-op ship scene (PC run): ControllerId i, a game player controller whose pawn is its main
+   character, acknowledged, controlling its own ship station (P1 and P2 different station classes) that names it back as its
+   controller, viewed through by its camera manager; cinematic byte 0x09 / 0x109 (bit 0x02 clear) */
 static u64 pawn_of(int i){ return 0x30000 + (u64)i * 0x1000; }
 static u64 pcm_of(int i){ return 0x40000 + (u64)i * 0x2000; }
+static u64 ship_of(int i){ return 0x50000 + (u64)i * 0x1000; }
 static void make_pc(int i, int controller_id){
   u64 pc = 0x10000 + (u64)i * 0x1000, lp = 0x20000 + (u64)i * 0x100;
   pcs[i] = pc; gw64(pc + PC_PLAYER, lp); gw32(lp + LP_CONTROLLER_ID, (u32)controller_id);
+  object(pc, K_BP_PC, LEVEL); object(pawn_of(i), K_ACTOR, LEVEL); object(ship_of(i), i == 1 ? K_SHIP_GUNNER : K_SHIP_PILOT, LEVEL);
   gw64(pc + PC_PAWN, pawn_of(i)); gw64(pc + PC_ACK_PAWN, pawn_of(i)); *GP(pc + PC_IGNORE_LOOK) = 0;
-  gw64(pc + PC_CAMERA_MANAGER, pcm_of(i)); gw64(pcm_of(i) + PCM_VIEW_TARGET, pawn_of(i)); gw64(pcm_of(i) + PCM_PENDING_VIEW_TARGET, 0);
+  gw32(pc + PC_CINEMATIC, i == 1 ? 0x109 : 0x09); gw64(pc + PC_MAIN_CHARACTER, pawn_of(i)); gw64(pc + PC_CONTROLLED_ACTOR, ship_of(i));
+  gw64(ship_of(i) + CA_CONTROLLER, pc);
+  gw64(pc + PC_CAMERA_MANAGER, pcm_of(i)); gw64(pcm_of(i) + PCM_VIEW_TARGET, ship_of(i)); gw64(pcm_of(i) + PCM_PENDING_VIEW_TARGET, 0);
 }
 static double cam_yaw(int i){ return rd(pcs[i] + PC_CONTROL_ROTATION + 8); }
 static double cam_pitch(int i){ return rd(pcs[i] + PC_CONTROL_ROTATION); }
@@ -71,9 +106,10 @@ static void reset(void){
   memset(g_mem, 0, MEM); memset(P, 0, sizeof P); memset(Acc, 0, sizeof Acc); memset(Gs, 0, sizeof Gs); memset(&T, 0, sizeof T);
   memset(rin_yaw, 0, sizeof rin_yaw); memset(rin_pitch, 0, sizeof rin_pitch);
   add_calls = orig_calls = engine_drops = abort_countdown = settle_countdown = 0; bad_lo = bad_hi = 0; loglen = 0; logbuf[0] = 0;
+  watch_lo = watch_hi = 0; watch_hits = 0;
   G.mode = 1; G.sens_x = G.sens_y = 1.5f; G.tightening = 3; G.invert = 0; G.test = 0; G.log = 0; G.button = 20; G.button_toggle = 0;
   clock_ns = 5000000000000ull;
-  make_pc(0, 0); make_pc(1, 1);
+  make_classes(); make_world(); make_pc(0, 0); make_pc(1, 1);
 }
 
 /* one 16 ms frame: each pad sends 4 samples (250 Hz) turning yaw_dps (a left turn) and pitch_dps (tilt up), then the listed
@@ -105,10 +141,11 @@ static int failures;
 /* a 90 deg/s left turn for 1 s at sensitivity 1.5 turns the camera 135 deg (UE yaw grows to the right) */
 static const double TURN = -135.0;
 
-static void closed_then_open_without_jump(const char* name, void (*close)(void), void (*open)(void)){
+static void closed_then_open_without_jump(const char* name, void (*close)(void), void (*open)(void), int why){
   reset(); G.log = 1; close();
   rate[0][0] = 90; rate[0][1] = 0; rate[1][0] = rate[1][1] = 0;
   frames(70, 1);   /* 1.12 s: gyro_log reports the dropped turn once a second */
+  CHECK(Gs[0].reason == why, "%s: closed for \"%s\", want \"%s\"", name, gate_reason[Gs[0].reason], gate_reason[why]);
   CHECK(cam_yaw(0) == 0 && cam_pitch(0) == 0 && add_calls == 0, "%s: closed gate turned the camera %.3f / %.3f (%d calls)", name, cam_yaw(0), cam_pitch(0), add_calls);
   CHECK(orig_calls == 70, "%s: the game's UpdateRotation must always run (%d)", name, orig_calls);
   CHECK(logged("closed ("), "%s: gyro_log must report the closed gate", name);
@@ -124,18 +161,111 @@ static void closed_then_open_without_jump(const char* name, void (*close)(void),
 static void title_close(void){ gw64(pcs[0] + PC_PAWN, 0); gw64(pcs[0] + PC_ACK_PAWN, 0); gw64(pcm_of(0) + PCM_VIEW_TARGET, 0x7000); }
 static void title_open(void){ make_pc(0, 0); }
 static void pending_close(void){ gw64(pcm_of(0) + PCM_PENDING_VIEW_TARGET, 0x7000); }
-static void pending_open(void){ gw64(pcm_of(0) + PCM_PENDING_VIEW_TARGET, pawn_of(0)); }   /* blending to its own pawn is fine */
+static void pending_open(void){ gw64(pcm_of(0) + PCM_PENDING_VIEW_TARGET, ship_of(0)); }   /* blending to its own controlled actor is fine */
 static void ignore_close(void){ *GP(pcs[0] + PC_IGNORE_LOOK) = 1; }
 static void ignore_open(void){ *GP(pcs[0] + PC_IGNORE_LOOK) = 0; }
 static void unreadable_close(void){ bad_lo = pcm_of(0) + PCM_PENDING_VIEW_TARGET; bad_hi = bad_lo + 8; }
 static void unreadable_open(void){ bad_lo = bad_hi = 0; }
 static void unreadable_pc_close(void){ bad_lo = pcs[0] + PC_ACK_PAWN; bad_hi = bad_lo + 8; }
-static void tagged_close(void){ u64 t = pawn_of(0) | 1; gw64(pcs[0] + PC_PAWN, t); gw64(pcs[0] + PC_ACK_PAWN, t); gw64(pcm_of(0) + PCM_VIEW_TARGET, t); }
+static void tagged_close(void){ u64 t = pawn_of(0) | 1; gw64(pcs[0] + PC_PAWN, t); gw64(pcs[0] + PC_ACK_PAWN, t); gw64(pcs[0] + PC_MAIN_CHARACTER, t);
+                                gw64(pcs[0] + PC_CONTROLLED_ACTOR, 0); gw64(pcm_of(0) + PCM_VIEW_TARGET, t); }
 static void tagged_open(void){ make_pc(0, 0); }
 static void unacked_close(void){ gw64(pcs[0] + PC_ACK_PAWN, 0); }
-static void spectating_close(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, pawn_of(1)); }
-static void spectating_open(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, pawn_of(0)); }
+static void spectating_close(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, ship_of(1)); }
+static void spectating_open(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, ship_of(0)); }
 static void no_camera_close(void){ gw64(pcs[0] + PC_CAMERA_MANAGER, 0); }
+
+/* game-specific relationship (PC run, docs/dev4k/GYRO.md): the title's OrbFrontEndPlayerController is 0x750 bytes and has a pawn
+   its camera views (the disproved gate opened there); its +0x7b8.. is another object's memory, here a main character the camera
+   views, so a gate reading it would open. None of it may be read. */
+static void frontend_close(void){
+  object(pcs[0], K_FRONTEND_PC, LEVEL); gw64(pcs[0] + PC_MAIN_CHARACTER, pawn_of(0)); gw64(pcs[0] + PC_CONTROLLED_ACTOR, 0);
+  gw64(pcm_of(0) + PCM_VIEW_TARGET, pawn_of(0)); watch_lo = pcs[0] + 0x750; watch_hi = pcs[0] + 0x1000; watch_hits = 0;
+}
+static void frontend_open(void){
+  CHECK(watch_hits == 0, "the gate read %d times past the end of a frontend controller", watch_hits);
+  CHECK(logged("not a game player controller"), "frontend controller closed for another reason:\n%s", logbuf);
+  watch_lo = watch_hi = 0; make_pc(0, 0);
+}
+static void engine_pc_close(void){   /* an ancestor of the wanted class: depth 1 < 2; the memory past its chain names the wanted class */
+  object(pcs[0], K_ENGINE_PC, LEVEL); gw64(chain_of(K_ENGINE_PC) + 2 * 8, cls(K_ORB_PC) + 0x30);
+}
+static void ship_view_pawn_close(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, pawn_of(0)); }   /* the disproved rule's open case */
+/* on foot: no ControlledActor, GetControlledActor falls back to MainCharacter */
+static void on_foot_view_ship_close(void){ gw64(pcs[0] + PC_CONTROLLED_ACTOR, 0); }
+static void on_foot_open(void){ gw64(pcs[0] + PC_CONTROLLED_ACTOR, 0); gw64(pcm_of(0) + PCM_VIEW_TARGET, pawn_of(0)); }
+static void no_main_character_close(void){ on_foot_open(); gw64(pcs[0] + PC_MAIN_CHARACTER, 0); }
+static void wrong_owner_close(void){ gw64(ship_of(0) + CA_CONTROLLER, pcs[1]); }
+static void no_owner_close(void){ gw64(ship_of(0) + CA_CONTROLLER, 0); }
+static void other_players_ship_close(void){   /* controlling P2's station, which names P2: the reciprocal check */
+  gw64(pcs[0] + PC_CONTROLLED_ACTOR, ship_of(1)); gw64(pcm_of(0) + PCM_VIEW_TARGET, ship_of(1));
+}
+/* not a controllable actor: its +0x2f0 is not read (it holds this controller, so a gate reading it would open) */
+static void not_controllable_close(void){ object(ship_of(0), K_ACTOR, LEVEL); watch_lo = ship_of(0) + CA_CONTROLLER; watch_hi = watch_lo + 8; watch_hits = 0; }
+static void not_controllable_open(void){
+  CHECK(watch_hits == 0, "the gate read the controller field of an actor that is not controllable (%d)", watch_hits);
+  watch_lo = watch_hi = 0; make_pc(0, 0);
+}
+static void unreadable_ship_close(void){ bad_lo = ship_of(0) + CA_CONTROLLER; bad_hi = bad_lo + 8; }
+static void cinematic_close(void){ gw32(pcs[0] + PC_CINEMATIC, 0x0b); }
+static void cinematic_open(void){ gw32(pcs[0] + PC_CINEMATIC, 0x09); }
+static void cinematic_view_close(void){ gw64(pcm_of(0) + PCM_VIEW_TARGET, CAMERA_ACTOR); }   /* a cutscene camera, bit not set */
+static void paused_close(void){ *GP(GSTATE + GS_PAUSED) = 1; }
+static void paused_open(void){ *GP(GSTATE + GS_PAUSED) = 0; }
+
+/* malformed class metadata: every one closes; the open side rebuilds the classes */
+static void classes_open(void){ make_classes(); make_pc(0, 0); }
+static void negative_depth_close(void){ gw32(cls(K_BP_PC) + 0x38, (u32)-1); }
+static void huge_depth_close(void){   /* 1000 > the 256 cap, while the entry at the wanted depth still matches */
+  gw32(cls(K_BP_PC) + 0x38, 1000);
+}
+static void huge_negative_depth_close(void){ gw32(cls(K_BP_PC) + 0x38, 0x80000000u); }
+static void wanted_negative_depth_close(void){   /* entry -1 of both chains made to match: only the sign check closes it */
+  gw32(cls(K_ORB_PC) + 0x38, (u32)-1); gw64(chain_of(K_BP_PC) - 8, cls(K_ORB_PC) + 0x30); gw64(chain_of(K_ORB_PC) - 8, cls(K_ORB_PC) + 0x30);
+}
+static void wanted_huge_depth_close(void){ gw32(cls(K_ORB_PC) + 0x38, 300); gw32(cls(K_BP_PC) + 0x38, 300);
+  gw64(chain_of(K_BP_PC) + 300 * 8, cls(K_ORB_PC) + 0x30); gw64(chain_of(K_ORB_PC) + 300 * 8, cls(K_ORB_PC) + 0x30); }
+static void entry_is_class_close(void){   /* the chain names the class itself, not its chain struct (class + 0x30) */
+  gw64(chain_of(K_BP_PC) + 2 * 8, cls(K_ORB_PC)); gw64(chain_of(K_ORB_PC) + 2 * 8, cls(K_ORB_PC));
+}
+static void chain_null_close(void){ gw64(cls(K_BP_PC) + 0x30, 0); }
+static void chain_misaligned_close(void){ gw64(cls(K_BP_PC) + 0x30, chain_of(K_BP_PC) + 4); }
+static void chain_unreadable_close(void){ gw64(cls(K_BP_PC) + 0x30, MEM - 8); }
+static void chain_entry_unreadable_close(void){ bad_lo = chain_of(K_BP_PC) + 2 * 8; bad_hi = bad_lo + 8; }
+static void class_tagged_close(void){ gw64(pcs[0] + OBJ_CLASS, cls(K_BP_PC) | 1); }
+static void singleton_null_close(void){ gw64(g_cls_slot[CLS_PLAYER_CONTROLLER], 0); }   /* not initialized yet: never initialized here */
+static void singleton_stale_close(void){   /* a slot naming memory whose own chain does not name it at its depth */
+  u64 f = 0x6f000; gw64(f + 0x30, chain_of(K_ENGINE_PC)); gw32(f + 0x38, 1);
+  gw64(chain_of(K_BP_PC) + 8, f + 0x30); gw64(g_cls_slot[CLS_PLAYER_CONTROLLER], f);
+}
+static void gs_class_malformed_close(void){ gw32(cls(K_BP_GS) + 0x38, (u32)-5); }
+
+/* the world chain: unreadable, cyclic, too long, wrong types: every one closes */
+static void world_open(void){ make_world(); make_pc(0, 0); make_pc(1, 1); }
+static void outer_null_close(void){ gw64(pcs[0] + OBJ_OUTER, 0); }
+static void outer_unreadable_close(void){ gw64(pcs[0] + OBJ_OUTER, MEM + 0x1000); }
+static void outer_misaligned_close(void){ gw64(pcs[0] + OBJ_OUTER, LEVEL + 2); }
+static void outer_cycle_close(void){
+  object(OUTERS, K_PACKAGE, OUTERS + 0x100); object(OUTERS + 0x100, K_PACKAGE, OUTERS); gw64(pcs[0] + OBJ_OUTER, OUTERS);
+}
+static void outer_long_close(void){   /* 40 outers before the level: past the 32 bound */
+  for(int k = 0; k < 40; k++) object(OUTERS + (u64)k * 0x100, K_PACKAGE, k == 39 ? LEVEL : OUTERS + (u64)(k + 1) * 0x100);
+  gw64(pcs[0] + OBJ_OUTER, OUTERS);
+}
+static void outer_short_open(void){   /* 3 outers before the level: found */
+  make_world(); make_pc(0, 0);
+  for(int k = 0; k < 3; k++) object(OUTERS + (u64)k * 0x100, K_PACKAGE, k == 2 ? LEVEL : OUTERS + (u64)(k + 1) * 0x100);
+  gw64(pcs[0] + OBJ_OUTER, OUTERS);
+}
+static void outer_unreadable_mid_close(void){ outer_short_open(); bad_lo = OUTERS + 0x100 + OBJ_OUTER; bad_hi = bad_lo + 8; }
+static void outer_mid_open(void){ bad_lo = bad_hi = 0; outer_short_open(); }
+static void no_level_close(void){ object(LEVEL, K_PACKAGE, WORLD); }
+static void world_null_close(void){ gw64(LEVEL + LEVEL_WORLD, 0); }
+static void world_unreadable_close(void){ bad_lo = WORLD + WORLD_GAME_STATE; bad_hi = bad_lo + 8; }
+static void gs_null_close(void){ gw64(WORLD + WORLD_GAME_STATE, 0); }
+static void gs_engine_class_close(void){ object(GSTATE, K_ENGINE_GS, LEVEL); }   /* AGameStateBase, not OBGameStateBase */
+static void gs_wrong_type_close(void){ object(GSTATE, K_WORLD, LEVEL); }
+static void pause_unreadable_close(void){ bad_lo = GSTATE + GS_PAUSED; bad_hi = bad_lo + 1; }
 
 static void test_both_players_turn_their_own_camera(void){
   reset();
@@ -143,6 +273,56 @@ static void test_both_players_turn_their_own_camera(void){
   frames(62, 3);
   CHECK(NEAR(cam_yaw(0), TURN * 0.992, 2.7) && NEAR(cam_pitch(0), 0, 1e-6), "P1 turned yaw %.3f pitch %.3f", cam_yaw(0), cam_pitch(0));
   CHECK(NEAR(cam_pitch(1), 45 * 0.992, 0.9) && NEAR(cam_yaw(1), 0, 1e-6), "P2 turned yaw %.3f pitch %.3f", cam_yaw(1), cam_pitch(1));
+}
+
+/* both ship roles open, each on its own station (different classes), and on foot too */
+static void ended_for_good(const char* name);
+static void test_ship_roles_and_on_foot_open(void){
+  reset();
+  rate[0][0] = 90; rate[1][0] = 90; rate[0][1] = rate[1][1] = 0;
+  frames(62, 3);
+  CHECK(Gs[0].reason == GATE_OPEN && Gs[1].reason == GATE_OPEN, "ship roles: P1 %s, P2 %s", gate_reason[Gs[0].reason], gate_reason[Gs[1].reason]);
+  CHECK(NEAR(cam_yaw(0), TURN * 0.992, 2.7) && NEAR(cam_yaw(1), TURN * 0.992, 2.7), "ship roles turned %.3f / %.3f", cam_yaw(0), cam_yaw(1));
+  reset(); on_foot_open();
+  gw64(pcs[1] + PC_CONTROLLED_ACTOR, pawn_of(1)); gw64(pcm_of(1) + PCM_VIEW_TARGET, pawn_of(1));   /* ControlledActor = MainCharacter */
+  rate[0][0] = 90; rate[1][0] = 90; rate[0][1] = rate[1][1] = 0;
+  frames(62, 3);
+  CHECK(Gs[0].reason == GATE_OPEN && Gs[1].reason == GATE_OPEN, "on foot: P1 %s, P2 %s", gate_reason[Gs[0].reason], gate_reason[Gs[1].reason]);
+  CHECK(NEAR(cam_yaw(0), TURN * 0.992, 2.7) && NEAR(cam_yaw(1), TURN * 0.992, 2.7), "on foot turned %.3f / %.3f", cam_yaw(0), cam_yaw(1));
+}
+
+/* the shared pause (OBGameStateBase +0x42b, measured 1 paused / 0 resumed for both players): both close, both still run the game's
+   UpdateRotation; only P1 (who paused) has a pause menu pointer and it stays cached after the game resumes: both reopen without a jump */
+static void test_shared_pause_both_players(void){
+  reset(); G.log = 1;
+  rate[0][0] = 90; rate[1][1] = 30; rate[0][1] = rate[1][0] = 0;
+  frames(20, 3);
+  double y0 = cam_yaw(0), p1 = cam_pitch(1); int calls = orig_calls;
+  *GP(GSTATE + GS_PAUSED) = 1; gw64(pcs[0] + 0x880, 0x77000);
+  frames(70, 3);
+  CHECK(cam_yaw(0) == y0 && cam_pitch(1) == p1, "paused: P1 moved %.4f, P2 moved %.4f", cam_yaw(0) - y0, cam_pitch(1) - p1);
+  CHECK(Gs[0].reason == GATE_PAUSED && Gs[1].reason == GATE_PAUSED, "paused: P1 %s, P2 %s", gate_reason[Gs[0].reason], gate_reason[Gs[1].reason]);
+  CHECK(orig_calls - calls == 140, "the game's UpdateRotation must run while paused (%d)", orig_calls - calls);
+  CHECK(logged("game paused"), "gyro_log must name the pause:\n%s", logbuf);
+  *GP(GSTATE + GS_PAUSED) = 0;   /* resumed: P1's menu pointer stays */
+  rate[0][0] = 0; rate[1][1] = 0;
+  frames(10, 3);
+  CHECK(NEAR(cam_yaw(0), y0, 1e-9) && NEAR(cam_pitch(1), p1, 1e-9), "resume jumped: P1 %.4f, P2 %.4f", cam_yaw(0) - y0, cam_pitch(1) - p1);
+  CHECK(Gs[0].reason == GATE_OPEN && Gs[1].reason == GATE_OPEN, "resumed: P1 %s, P2 %s", gate_reason[Gs[0].reason], gate_reason[Gs[1].reason]);
+  rate[0][0] = 90; rate[1][1] = 30; frames(62, 3);
+  CHECK(NEAR(cam_yaw(0) - y0, TURN * 0.992, 2.7) && NEAR(cam_pitch(1) - p1, 45 * 0.992, 0.9), "after resume turned %.3f / %.3f",
+        cam_yaw(0) - y0, cam_pitch(1) - p1);
+}
+
+/* the synthetic test during a shared pause that does call UpdateRotation: INCONCLUSIVE, never PASS */
+static void test_synthetic_shared_pause_is_inconclusive(void){
+  reset(); G.mode = 0; T.state = 1;
+  frames(220, 1);
+  CHECK(T.state == 2, "not running (state %d)", T.state);
+  paused_close(); frames(5, 1);
+  CHECK(T.state == 4 && logged("game paused"), "a shared pause while running:\n%s", logbuf);
+  paused_open();
+  ended_for_good("shared pause while running");
 }
 
 /* paused: the paused tick skips PlayerTick, so UpdateRotation is not called while the pad keeps turning */
@@ -346,15 +526,58 @@ int main(void){
   static GuestFn disp[64]; g_disp = disp;
   g_add_yaw = g_code_lo; g_add_pitch = g_code_lo + 4;
   disp[0] = fake_add_yaw; disp[1] = fake_add_pitch;
-  closed_then_open_without_jump("title (no pawn)", title_close, title_open);
-  closed_then_open_without_jump("pending view target another actor", pending_close, pending_open);
-  closed_then_open_without_jump("ignore look input", ignore_close, ignore_open);
-  closed_then_open_without_jump("camera manager unreadable", unreadable_close, unreadable_open);
-  closed_then_open_without_jump("controller field unreadable", unreadable_pc_close, unreadable_open);
-  closed_then_open_without_jump("tagged pawn pointer", tagged_close, tagged_open);
-  closed_then_open_without_jump("pawn not acknowledged", unacked_close, title_open);
-  closed_then_open_without_jump("viewing another pawn", spectating_close, spectating_open);
-  closed_then_open_without_jump("no camera manager", no_camera_close, title_open);
+  closed_then_open_without_jump("title (no pawn)", title_close, title_open, GATE_NO_PAWN);
+  closed_then_open_without_jump("pending view target another actor", pending_close, pending_open, GATE_PENDING_VIEW_TARGET);
+  closed_then_open_without_jump("ignore look input", ignore_close, ignore_open, GATE_IGNORE_LOOK);
+  closed_then_open_without_jump("camera manager unreadable", unreadable_close, unreadable_open, GATE_NO_CAMERA);
+  closed_then_open_without_jump("controller field unreadable", unreadable_pc_close, unreadable_open, GATE_UNREADABLE);
+  closed_then_open_without_jump("tagged pawn pointer", tagged_close, tagged_open, GATE_TAGGED);
+  closed_then_open_without_jump("pawn not acknowledged", unacked_close, title_open, GATE_NOT_ACKNOWLEDGED);
+  closed_then_open_without_jump("viewing another pawn", spectating_close, spectating_open, GATE_VIEW_TARGET);
+  closed_then_open_without_jump("no camera manager", no_camera_close, title_open, GATE_NO_CAMERA);
+  closed_then_open_without_jump("title frontend controller with a viewed pawn", frontend_close, frontend_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("engine player controller", engine_pc_close, title_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("ship station viewing the pawn", ship_view_pawn_close, spectating_open, GATE_VIEW_TARGET);
+  closed_then_open_without_jump("on foot viewing a ship", on_foot_view_ship_close, on_foot_open, GATE_VIEW_TARGET);
+  closed_then_open_without_jump("no main character", no_main_character_close, title_open, GATE_NO_MAIN_CHARACTER);
+  closed_then_open_without_jump("station names another controller", wrong_owner_close, title_open, GATE_WRONG_OWNER);
+  closed_then_open_without_jump("station names no controller", no_owner_close, title_open, GATE_WRONG_OWNER);
+  closed_then_open_without_jump("controlling the other player's station", other_players_ship_close, title_open, GATE_WRONG_OWNER);
+  closed_then_open_without_jump("controlled actor not controllable", not_controllable_close, not_controllable_open, GATE_CONTROLLED_ACTOR);
+  closed_then_open_without_jump("station controller unreadable", unreadable_ship_close, unreadable_open, GATE_CONTROLLED_ACTOR);
+  closed_then_open_without_jump("cinematic mode bit", cinematic_close, cinematic_open, GATE_CINEMATIC);
+  closed_then_open_without_jump("cutscene camera view target", cinematic_view_close, spectating_open, GATE_VIEW_TARGET);
+  closed_then_open_without_jump("shared pause", paused_close, paused_open, GATE_PAUSED);
+  closed_then_open_without_jump("negative class depth", negative_depth_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("class depth over the cap", huge_depth_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("class depth 0x80000000", huge_negative_depth_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("wanted class negative depth", wanted_negative_depth_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("wanted class depth over the cap", wanted_huge_depth_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("chain entry is the class, not its chain", entry_is_class_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("base chain null", chain_null_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("base chain misaligned", chain_misaligned_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("base chain unreadable", chain_unreadable_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("base chain entry unreadable", chain_entry_unreadable_close, unreadable_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("tagged class pointer", class_tagged_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("class singleton not initialized", singleton_null_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("class singleton stale", singleton_stale_close, classes_open, GATE_NOT_GAME_CONTROLLER);
+  closed_then_open_without_jump("game state class malformed", gs_class_malformed_close, classes_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("no Outer", outer_null_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("Outer unreadable", outer_unreadable_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("Outer misaligned", outer_misaligned_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("Outer cycle", outer_cycle_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("40 Outers before the level", outer_long_close, outer_short_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("an Outer in the chain unreadable", outer_unreadable_mid_close, outer_mid_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("no level in the Outer chain", no_level_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("level without a world", world_null_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("world game state unreadable", world_unreadable_close, unreadable_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("world without a game state", gs_null_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("engine game state class", gs_engine_class_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("game state of another type", gs_wrong_type_close, world_open, GATE_NO_GAME_STATE);
+  closed_then_open_without_jump("pause byte unreadable", pause_unreadable_close, unreadable_open, GATE_NO_GAME_STATE);
+  test_ship_roles_and_on_foot_open();
+  test_shared_pause_both_players();
+  test_synthetic_shared_pause_is_inconclusive();
   test_both_players_turn_their_own_camera();
   test_no_jump_after_pause();
   test_synthetic_waits_for_continuous_gate();

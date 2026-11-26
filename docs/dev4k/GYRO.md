@@ -27,22 +27,39 @@ A `save/gyro_calibration.txt` written by the earlier build is not read or moved;
 until it is moved out.
 
 ## How it turns the camera
-**PC validation, 08:44:** the current gate is not accepted. It opens briefly during the title world's initialization, but closes
-in the actual co-op ship scene because each player's view target is a separate controlled actor, not `AController::Pawn`.
-The synthetic result at 18-20 seconds belongs to initialization, not gameplay. A game-specific ownership gate is under investigation.
+**PC validation, 08:44:** the earlier gate (view target == `AController::Pawn`) was disproved: it opened briefly during the title
+world's initialization and closed in the actual co-op ship scene, where each player's view target is a separate controlled actor.
+Its synthetic result at 18-20 seconds belonged to initialization, not gameplay. It is replaced by the game-specific gate below
+(offline tests only so far; the PC checks are listed under "Not verified").
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
   not focused or the PC settings panel is open.
 - Gate (`gyro_gate`): UpdateRotation alone proves nothing, because `PlayerTick` (main+0x3201750) calls it also while the controller
-  is Inactive without a pawn (the title: this is why the earlier synthetic test turned a title ControlRotation). The turn goes
-  through only when, read from the controller before the game's UpdateRotation (offline RE of main): Pawn (+0x2e8) is set and an
-  untagged pointer (low bit clear), AcknowledgedPawn (+0x358) is the same pawn, the IgnoreLookInput counter (byte +0x33a; the
-  virtual at vtable+0x8d8, main+0x2c9d810, returns it != 0) is 0, the PlayerCameraManager (+0x368) is readable, its
-  ViewTarget.Target (+0x340) is the pawn and its PendingViewTarget.Target (+0xc00) is empty or the pawn, and DeltaTime > 0. The
-  pawn and view target are compared as pointers, never read; anything unreadable closes the gate. A closed gate still takes the
-  waiting turn and drops it. The assumption that gameplay has view target equal to pawn was disproved by the PC run above;
-  this condition needs replacement. `gyro_log=1` prints every gate change with the raw pointers.
+  is Inactive (the title and menus). The turn goes through only when, read before the game's UpdateRotation (offsets from offline RE
+  of main, checked against live snapshots of the title, co-op ship gameplay, the pause menu and after resuming):
+  - Type first: the controller is an `OrbBasePlayerController` (class singleton main+0x9cb95d0). The check is the engine's own IsA
+    (main+0x451d700): the object's class (+0x10) has a base chain array (+0x30) and a signed depth (+0x38); the entry at the wanted
+    class's depth must be the wanted class's chain struct, wanted class + 0x30 (not the class pointer). The wanted class's own chain
+    must name itself at its depth, depths must be 0..256 and the wanted depth not above the actual one; every pointer is checked
+    (set, 8-aligned, below 2^48, readable). Singletons are only read, never initialized (no StaticClass call): an empty one closes
+    the gate. The title's `OrbFrontEndPlayerController` is only 0x750 bytes, so none of the game fields below is read until this holds.
+  - Pawn (+0x2e8) set and a plain pointer, AcknowledgedPawn (+0x358) the same, IgnoreLookInput (byte +0x33a) 0, cinematic mode bit
+    (+0x4c0 mask 0x02; measured 0x09 / 0x109 in gameplay) clear, MainCharacter (+0x7b8) set.
+  - The controlled actor as the game's GetControlledActor (main+0x45144c0) gives it: ControlledActor (+0x7c8) if set (a ship
+    station in co-op, a different class per role), else MainCharacter (on foot). A ControlledActor other than MainCharacter must be
+    an `OrbControllableActor` (main+0x9cba540) before its own field is read, and its controlling player controller (+0x2f0,
+    measured equal to the controller for both players) must be this controller.
+  - The PlayerCameraManager (+0x368) is readable, its ViewTarget.Target (+0x340) is that controlled actor and its
+    PendingViewTarget.Target (+0xc00) is empty or the same actor.
+  - The shared pause is off: the controller's Outer chain (+0x20, at most 32 steps, a repeated object closes) to its `ULevel`
+    (main+0x9c51c88), the level's OwningWorld (+0xc0), the world's GameState (+0x1d8), which must be an `OBGameStateBase`
+    (main+0x9cb7bf0) whose pause byte (+0x42b) is 0 (measured 1 while paused and 0 after resuming, for both players). The pause menu
+    pointer (+0x880) is not used: only the player who paused has one, and it stays cached after resuming.
+  - DeltaTime > 0.
+  Anything unreadable, malformed or of another type closes it. A closed gate still takes the waiting turn and drops it.
+  `gyro_log=1` prints every gate change with the reason and the raw pointers (pawn, main character, controlled actor and its
+  controller, view target, pending, cinematic byte, game state and its pause).
 - Pause: the paused world tick (TickActor main+0x3208eb0, paused path +0x3209130) zeroes RotationInput and usually does not call
   PlayerTick, so UpdateRotation does not run at all (the earlier note "DeltaTime 0" was wrong). A turn nobody took for 100 ms is
   dropped when the next sample arrives, and a turn waiting when UpdateRotation comes back after more than 100 ms is dropped too, so
@@ -65,12 +82,24 @@ The synthetic result at 18-20 seconds belongs to initialization, not gameplay. A
   calibration stored, restore keeping it (also for a session started before the restore), a standalone install, an unexpected or
   dangling save link storing nothing, the host-clock to sensor-clock rollback, and the forward jump when polling takes over (the
   earlier build calibrated 0.24 s after the events stopped). The earlier build fails five of them. Linux and Windows: 8/8 pass.
-  The gyro gate C harness also passes on Windows; its simulated camera does not establish the real game's camera relationship.
+  The gyro gate C harness models the measured relationship (class metadata, controllers, stations, world and game state) but cannot
+  prove the real game's camera turns.
 - Gate tests (`python tests/test_gyro_gate.py`, C in `tests/test_gyro_gate.c`): the real `orbitals_gyro_pad` and hooked
-  UpdateRotation on fake guest controllers with small engine stand-ins. Each closed case (title without a pawn, pending view target
-  another actor, IgnoreLookInput, camera manager or controller field unreadable, tagged pawn pointer, pawn not acknowledged,
-  viewing another pawn, no camera manager) turns nothing for 1.1 s of a 90 deg/s turn, still runs the game's UpdateRotation, logs
-  the closed gate and the dropped turn, and opening it causes no jump; both players turn their own camera at once; no jump after a
+  UpdateRotation on fake guest controllers with small engine stand-ins and the engine's class metadata layout (class chains built
+  as the game has them; the default scene is co-op at the ship, each player on its own station class). Each closed case turns
+  nothing for 1.1 s of a 90 deg/s turn, closes for its own logged reason, still runs the game's UpdateRotation, logs the dropped
+  turn, and opening it causes no jump: title without a pawn, the title's frontend controller with a viewed pawn (no read past its
+  0x750 bytes), an engine player controller, pending view target another actor, IgnoreLookInput, camera manager or controller field
+  unreadable, tagged pawn pointer, pawn not acknowledged, viewing the other player's station, a station viewing the pawn (the
+  disproved rule), on foot viewing a station, no main character, a station naming another or no controller, controlling the other
+  player's station, a controlled actor that is not controllable (its controller field not read) or unreadable, the cinematic bit,
+  a cutscene camera as view target, the shared pause; malformed metadata (negative, 0x80000000 and over-cap depths on either class,
+  a chain entry naming the class instead of its chain, chain null / misaligned / unreadable, a tagged class pointer, an empty or
+  stale singleton, a malformed game state class); the world chain (no, unreadable or misaligned Outer, an Outer cycle, 40 Outers,
+  an unreadable one mid-chain, no level, no world, no or unreadable game state, an engine or other game state class, an unreadable
+  pause byte). Both ship roles and on foot open for both players; a shared pause closes both players and both reopen without a
+  jump while P1's pause menu pointer stays cached; a shared pause during the synthetic test ends it INCONCLUSIVE; both players turn
+  their own camera at once; no jump after a
   2 s pause or DeltaTime 0 frames; the synthetic test starts only after 3 s of an unbroken open gate and passes, ends
   INCONCLUSIVE (never PASS) when the gate closes mid-test, and FAILs when the engine drops the input. Review cases: the 3 s
   window starts over after an UpdateRotation gap (2.4 s open + 3.2 s paused, and a 128 ms gap) and for a new controller on the
@@ -85,6 +114,12 @@ The synthetic result at 18-20 seconds belongs to initialization, not gameplay. A
   open, closed turn kept, no seen reset, no gap drop, each check removed, no INCONCLUSIVE, no relock check, no window reset on a
   gap or a new controller, no abort on a gap, no drop of the ended test's turn, no running check at publication, no clear at an
   INCONCLUSIVE end) each fail at least one test.
+  The runner also builds 19 mutations of the new gate (no controller type check, the type check after the game fields, the chain
+  entry compared with the class, no wanted/actual depth comparison, no negative depth or cap check, no self check of the
+  singleton, view target or pending compared with the pawn, no MainCharacter fallback, no controllable type, owner, main
+  character, cinematic or pause check, an unknown game state accepted, no game state type check, no Outer bound, the first Outer
+  taken as the level) and requires each to fail. Removing the cycle check alone is not observable (the 32 bound still closes), nor
+  is weakening the pointer alignment check (every read also requires alignment).
 - Synthetic test and the gate: it starts only after 3 s of continuous open gate on one player's controller (the 3 s start over
   whenever it closes, UpdateRotation stops for over 100 ms or another controller takes the player); once it runs, any such break
   logs `gyro test: INCONCLUSIVE (...)`, gives no result, drops the waiting synthetic turn and cannot be resumed.
@@ -93,7 +128,9 @@ The synthetic result at 18-20 seconds belongs to initialization, not gameplay. A
 - Feel: NOT OBSERVED until the owner plays. Values chosen: sensitivity 1.5 x / 1.5 y, tightening 3 deg/s, touchpad hold to pause.
 
 ## Not verified
-- The current gate fails the real gameplay check, as recorded above. A synthetic PASS during initialization is not acceptance.
+- The new gate is checked only offline. Still to observe on the PC: title and menus closed, both co-op ship roles open, on foot,
+  a cutscene, pause / resume for both players, the synthetic test enabled late in gameplay, and a visible camera turn. A synthetic
+  PASS during initialization is not acceptance.
 - Sign of the axes with a real pad (left turn -> camera left, tilt up -> look up) follows SDL's sensor axes; `gyro_invert` fixes it
   if it is the other way.
 - Steam Input / DS5Bridge can take the pad's sensors before SDL; the log line `gyro: P1 ... has a gyro` confirms SDL sees them.
