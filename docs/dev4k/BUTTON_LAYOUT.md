@@ -50,9 +50,9 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   `(asset, const FKey*, EPlatformType, UTexture2D** out) -> bool` (InputIcons TMap at asset+0x30, 0x70-byte elements; the
   per-platform TMap inside, 0x18-byte elements: key byte, texture at +8). Its only callers: the `GetIconBrushForKey` exec
   (main+0x40b2d20, bl at 0x40b2e64: Blueprint prompts) and the native icon widget (bl at 0x4634a78: asks Switch 3 through the shared
-  `return 3` stub 0x4c4f0 when it has an owning player, Xbox 2 when not). `InputIcons` is CPF_Edit only (not Blueprint visible), and a
-  search of the text for the inlined two-level lookup (0x70 / 0x18 strides with a byte key) finds no other copy (the two other byte-keyed
-  0x18 maps, 0x453efec / 0x4540f4c, are gameplay maps on actors). The runtime wraps that function: a Switch request (and, for
+  `return 3` stub 0x4c4f0 when it has an owning player, Xbox 2 when not). `InputIcons` is CPF_Edit only (not Blueprint visible).
+  The initial search missed the action-prompt copy because it compares against a constant rather than a register;
+  that separate route is handled above. The runtime wraps the per-key function: a Switch request (and, for
   PlayStation, the widget's Xbox fallback) looks up 1 (PlayStation) / 2 (Xbox) first and falls back to the original platform when the key
   has no entry or its texture is NULL (the output is put back first). Nothing in guest memory is written. Fail closed: the entry, both
   element strides, the key / texture loads and the two callers' `bl` words are checked; a miss logs "button icons: not applied (...)"
