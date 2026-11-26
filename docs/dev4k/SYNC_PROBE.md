@@ -29,3 +29,19 @@ This is a promising single run, not an accepted optimization or proof of long-se
 mode2/1 comparison at1800p and2160p is next; both variants use the same PlayStation layout and FLIGHT0 configuration.
 
 Undo any sync experiment by removing `env=SWR_ROMFS_EXTRA_OVERLAY=...` from the test INI. Do not change the owner profile or replace the original game pak.
+
+## Reproduce the overlay without overwriting game files
+
+Use an extracted copy of the owned game's `Orbitals/Platforms/Switch2/Config/Switch2DeviceProfiles.ini`; change only
+`r.GTSyncType=2` to `r.GTSyncType=1`, retaining encoding and line endings. The preserved helper takes a new output path:
+
+```text
+python3 tools/dev4k/pakpatch.py ORIGINAL.pak NEW.pak Orbitals/Platforms/Switch2/Config/Switch2DeviceProfiles.ini=EDITED_COPY.ini
+```
+
+It supports unencrypted, unsigned UE v11 paks and refuses an existing output. Place the resulting copy under the overlay's
+`Orbitals/Content/Paks/Orbitals-Switch2.pak`, not over the original installation. No game data or keys are tracked in git.
+The parent reproduced the test artifact from the original: SHA256
+`ad895aa67baa3f693fbbe6912e924ff97b5e35807e2cd85ae4d5eec23958587f`; the edited INI differs by only that one value.
+The helper's existing-destination rejection also preserved the prior output hash. This is artifact evidence, not a claim
+that mode1 meets the performance or long-session-stability target. Extra overlap may change input latency; latency is not measured.
