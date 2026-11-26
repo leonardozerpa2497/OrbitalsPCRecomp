@@ -65,6 +65,8 @@ const char* orbitals_layout_overlay(void){
 enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
 int mem_block(int i, u64* addr, u64* size, u32* perm);   /* mem.c */
+int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx);
+int mem_span_ok_locked(u64 addr, u64 size, u32 perm);   /* inside mem_with_range only */
 #ifdef _WIN32
 #include <windows.h>
 static int host_committed(const void* p, size_t n){
@@ -75,7 +77,7 @@ static int host_committed(const void* p, size_t n){
 static int host_committed(const void* p, size_t n){ (void)p; (void)n; return 1; }
 #endif
 static int ei_clear(u64 obj){
-  if(!guest_span_writable(obj,0x78,8)) return 0;
+  if((obj&7) || !mem_span_ok_locked(obj,0x78,PERM_RW)) return 0;
   u32 num=gr32(obj+0x30), max=gr32(obj+0x34), bits=gr32(obj+0x50), nfree=gr32(obj+0x5c);
   if(!num || num>256 || max<num || bits<num || bits>max+64 || nfree>num) return 0;
   gw32(obj+0x50,0); gw32(obj+0x58,0xffffffffu); gw32(obj+0x5c,0); __atomic_store_n((u32*)GP(obj+0x30),0,__ATOMIC_RELEASE);
@@ -85,7 +87,7 @@ static int ei_clear(u64 obj){
    Switch 3), and the Switch 2 game always asks for the Switch entry. Each of those maps is 4 set elements of 24 bytes (key byte,
    texture pointer at +8, hash next id at +16, hash index at +20) holding the keys 0..3 and four textures of one class: the Switch
    element gets the texture of the layout's entry, so every prompt draws that controller's icon for the same key. */
-static int g_icons_done;
+static int g_icons_done; static u64 g_tex_vtable;   /* the texture class, from the first full match */
 static int icon_map_patch(u64 a, int want){
   int at[4]={-1,-1,-1,-1};
   for(int e=0;e<4;e++){
@@ -98,13 +100,26 @@ static int icon_map_patch(u64 a, int want){
   u64 tex[4], vt=0;
   for(int k=0;k<4;k++){
     tex[k]=gr64(a+24*at[k]+8);
-    if(!tex[k] || (tex[k]&7) || !guest_span_readable(tex[k],8,8) || !host_committed(GP(tex[k]),8)) return 0;
+    if(!tex[k] || (tex[k]&7) || !mem_span_ok_locked(tex[k],8,PERM_R) || !host_committed(GP(tex[k]),8)) return 0;
     u64 v=gr64(tex[k]); if(!v || (vt && v!=vt)) return 0; vt=v;
   }
   if(vt<g_code_lo || vt>=g_code_hi+0x8000000ull) return 0;   /* a vtable in the game module */
+  if(g_tex_vtable && vt!=g_tex_vtable) return 0;
+  if(!g_tex_vtable){ if(tex[0]==tex[1] || tex[1]==tex[2] || tex[2]==tex[3]) return 0; g_tex_vtable=vt; LOG("Orbitals: button icons: texture class %llx\n",(unsigned long long)vt); }
   if(tex[3]==tex[want]) return 0;
   gw64(a+24*at[3]+8,tex[want]);
   return 1;
+}
+static void scan_chunk(u64 c, u64 n, void* ctx){
+  int* cleared=ctx;
+  if(!host_committed(GP(c),(size_t)n)) return;
+  const u64* w=(const u64*)GP(c);
+  for(u64 k=0;k+15<n/8;k++){
+    if(g_accept_bottom && w[k]==g_ei_vtable) *cleared+=ei_clear(c+k*8);
+    else if((u8)w[k]<=3 && (u8)w[k+3]<=3 && (u8)w[k+6]<=3 && (u8)w[k+9]<=3 &&
+            ((1u<<(u8)w[k])|(1u<<(u8)w[k+3])|(1u<<(u8)w[k+6])|(1u<<(u8)w[k+9]))==15)
+      g_icons_done+=icon_map_patch(c+k*8,g_layout==1? 2 : 1);
+  }
 }
 static void ei_scan_thread(void* arg){
   (void)arg; int cleared=0;
@@ -120,16 +135,9 @@ static void ei_scan_thread(void* arg){
     for(int i=0;;i++){
       u64 a,sz; u32 perm; if(!mem_block(i,&a,&sz,&perm)) break;
       if((perm&3)!=3 || (perm&4) || sz<0x1000) continue;
-      for(u64 c=a;c<a+sz;c+=0x100000){   /* 1 MB at a time, committed pages only */
+      for(u64 c=a;c<a+sz;c+=0x100000){   /* 1 MB at a time, under the memory lock (no unmap meanwhile), committed pages only */
         u64 n= a+sz-c<0x100000? a+sz-c : 0x100000;
-        if(!host_committed(GP(c),(size_t)n)) continue;
-        const u64* w=(const u64*)GP(c); scanned+=n;
-        for(u64 k=0;k+15<n/8;k++){
-          if(g_accept_bottom && w[k]==g_ei_vtable) cleared+=ei_clear(c+k*8);
-          else if((u8)w[k]<=3 && k+12<n/8 && (u8)w[k+3]<=3 && (u8)w[k+6]<=3 && (u8)w[k+9]<=3 &&
-                  ((1u<<(u8)w[k])|(1u<<(u8)w[k+3])|(1u<<(u8)w[k+6])|(1u<<(u8)w[k+9]))==15)
-            g_icons_done+=icon_map_patch(c+k*8,g_layout==1? 2 : 1);
-        }
+        if(mem_with_range(c,n,scan_chunk,&cleared)) scanned+=n;
       }
     }
     static int said_c=-1;
@@ -142,12 +150,13 @@ static void ei_scan_thread(void* arg){
    loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads the map */
 enum { EI_SLOTS=64 };
 static struct { u64 pc; GuestFn orig; } g_eiw[EI_SLOTS]; static int g_neiw;
+static void ei_clear_cb(u64 a, u64 n, void* ctx){ (void)n; (void)ctx; ei_clear(a); }
 static void ei_virtual(CPU* c, u64 entry){
   u64 obj=c->x[0];
   GuestFn orig=NULL; for(int i=0;i<g_neiw;i++) if(g_eiw[i].pc==entry){ orig=g_eiw[i].orig; break; }
   if(!orig) return;
   orig(c,entry);
-  if(obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable && gr32(obj+0x30)) ei_clear(obj);
+  if(obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable && gr32(obj+0x30)) mem_with_range(obj,0x78,ei_clear_cb,NULL);
 }
 static void ei_install(const SwrModInfo* mod){
   if(!g_layout) return;
