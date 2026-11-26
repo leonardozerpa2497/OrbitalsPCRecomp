@@ -79,7 +79,23 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   texture. It cost 10.7% frames over 17.7 ms at 1800p co-op (see Performance below).
 - With `button_accept_bottom=1`, the PC runs accept title/main/lobby and PlayStation Settings with the bottom button,
   return with the right button, and use the selected layout's glyphs. Xbox player two's pause/resume flow also passes.
-  On-foot jump and every gameplay interaction have not been exercised.
+  Xbox on-foot controls were subsequently exercised in run20261126-121131-332d70f3: holding the right button
+  exits both ship seats; bottom-button presses make both characters jump (`xbox-both-jumping_s.png`).
+  Pause and right-button return also work on foot (`xbox-onfoot-paused_s.png`, `xbox-onfoot-resumed_s.png`).
+  This does not exhaust every gameplay interaction.
+
+## Controller artwork limitation (observed on the PC)
+
+The join screen still draws Nintendo Pro/Joy-Con controllers although the prompts beneath them correctly show
+Cross/Circle or A/B. A precise image-widget hook was implemented and independently reviewed (source fbf2512,
+integration8541377), then installed with a regenerated module and checked for both layouts.
+The real wrapper at main+0x40e13e0 ran for types3/4, but the widget's map had no nonnull image for Xbox0 or
+PlayStation2/1. Both runs logged `keeps the Nintendo drawing (no image for the layout)` and kept the original image.
+Screenshots: `/tmp/claude-1000/orb/art-ps-controllers_s.png` and `art-xbox-join_s.png`.
+Logs: `/tmp/claude-1000/bench/art-ps-final/Orbitals.log` and the isolated Xbox run20261126-121131-332d70f3.
+The ineffective hook is reverted from the final runtime; its developer branch and commits remain local for continuation.
+Completing this part needs a verified asset replacement/overlay supplying those drawings, not another platform-number change.
+No replacement asset has been built or validated. GoalC is therefore partial despite working prompts and menu conventions.
 
 ## Accept on the bottom button (live menus verified; gameplay coverage partial)
 - The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (`BP_Switch2InputPlatformData`

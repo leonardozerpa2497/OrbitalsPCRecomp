@@ -44,6 +44,12 @@ at110.20s on ControllerId0 and finishes at112.53s: yaw−134.460°, pitch45.000�
 with both integrals to0.00%. The105s/115s screenshots (`-camera-before_s.png`/`-camera-after_s.png`) visibly show only
 player1's view turning; player2 keeps looking toward the wreck. This supplies the missing player1 gameplay proof without
 relaxing the continuity or terminal-abort rules. Build log `/tmp/orbitals-after-flight-1026.log`: NVN/runtime exit0.
+
+**On-foot pause check, run20261126-121131-332d70f3:** both players leave their seats by holding the right face button;
+the screenshots show their characters inside the ship. At264.74s player1 closes for shared pause with controlledactor0,
+ViewTarget=MainCharacter; at280.49s it reopens with the same relationship and pause0. Player2's UpdateRotation pauses.
+The diagnostic logs only changes of controller or gate reason, so a ship-to-foot transition that stays open does not
+produce its own line. This is a gate/pause observation, not a synthetic on-foot camera-result claim.
 - Native: the game's own `APlayerController::UpdateRotation` (main+0x31fdf90, and the game's override main+0x2cea090) is hooked;
   before it runs, the gyro turn is given to `AddYawInput` / `AddPitchInput` (main+0x320a850 / +0x320a7c0), the same functions the
   stick ends in; the frame applies it like stick input and the stick keeps working. Nothing is applied while the game window is
