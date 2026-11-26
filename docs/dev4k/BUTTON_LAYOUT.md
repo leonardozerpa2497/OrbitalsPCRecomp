@@ -81,7 +81,7 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   return with the right button, and use the selected layout's glyphs. Xbox player two's pause/resume flow also passes.
   On-foot jump and every gameplay interaction have not been exercised.
 
-## Accept on the bottom button (experimental, partial)
+## Accept on the bottom button (live menus verified; gameplay coverage partial)
 - The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (`BP_Switch2InputPlatformData`
   MappingContextRedirects: IMC_UI_Default, IMC_UI_CRU, IMC_Default, IMC_Cutscene, IMC_SpiritJug, IMC_SettlementGames ->
   `*_PlatformSwitch`) and lists the Switch versions as its UI contexts (`MoreporkDeveloperSettings` PlatformMappingContexts).
@@ -106,7 +106,7 @@ The regenerated module exports the dynamic lookup and both generated caller chun
 
 ## Review notes (Codex, 2026-11-26)
 - (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
-- Open for `button_accept_bottom` (why it stays experimental): the virtual-function wrappers are not narrow: the class overrides
+- Remaining implementation limitation for `button_accept_bottom`: the virtual-function wrappers are not narrow: the class overrides
   only its two destructors (slots 0 / 1, never wrapped), so every other slot is a UObject function shared with thousands of classes
   and each of their calls pays the wrapper's check. The map write itself is one aligned store per live element (value := key, same
   class checked), counters, free list and hash untouched. The narrow fix is the C++ consumer of the redirects (Enhanced Input's
@@ -136,23 +136,19 @@ The regenerated module exports the dynamic lookup and both generated caller chun
   the wrapper rewrites the map BEFORE calling the original, while the caller still holds its receiver, and reads nothing after the
   original returns (a callee that retires or frees the object cannot make it touch a dead object); the original gets the registers
   unchanged. Tested on the real install path (`ei_wrap_vtable`) with a callee that retires the object (tests/test_button_layout.py).
-  Not shown yet: that the pre-call rewrite catches the maps as early as the post-call one did (the first virtual call after the
-  properties are read must come before Enhanced Input reads the map). PC check: the "N Switch mapping context redirects ... now keep
-  the PC contexts" log line once the lobby loads, and the bottom button accepting in the lobby. If it does not show, the fallback is
-  a verified PostLoad-only hook (not built).
+  The installed build logs six rewritten contexts before use, and bottom acceptance is observed in the lobby and Settings.
+  This demonstrates the required timing on the tested paths; it is not proof that every future context is covered.
+  A narrower PostLoad/consumer hook remains an unimplemented alternative.
 
-## Performance: the icon scan (parent's measurement, 2026-11-26)
+## Performance: removed icon scan and measured replacement
 - With `button_layout=playstation` the once-a-second whole-memory scan under the memory lock gives repeatable frame spikes at 1800p
   (34-36 fps, p95 ~64 ms, p99 ~160 ms) against Nintendo 47 fps / p95 26 ms. It must not stay the final design.
-- Scanner-free route (not done): the icons are native: `UMoreporkInputIconDataAsset`, `UMoreporkInputIcon`,
-  `UMoreporkInputIconRichTextDecorator`, `UMoreporkInputIconCombo` (names in the reflection data). Find the native lookup that does
-  `TMap<EPlatformType, UTexture2D*>::Find(Switch=3)` (start from the UFunction / property tables of those classes, e.g. the
-  `InputIconData` property at main+0x86df628) and hook it to look up 1 (PlayStation) or 2 (Xbox); fall back to 3 when that entry is
-  empty. `GetPlatformIcons` / `SetPlatformIcons` (exec 0x449db80 / 0x449e150, field +0xd8) is only a bool user setting, not the type.
-- Done (2026-11-26, offline): the scan is removed; icons go through the icon lookup wrapper above, at no cost outside icon lookups
-  (one extra lookup only when a key lacks the layout's icon). Bench needed: same 1800p co-op scene, Nintendo vs PlayStation,
-  alternated >= 2 runs each; expected PlayStation = Nintendo within spread (before: PlayStation 34.37 fps, p95 64.55, p99 163.46,
-  spikes 10.70%, max 674 ms; Nintendo 48.30 fps, p95 25.37, p99 29.53, spikes 0.83%).
+- The scanner-free replacement is installed and observed. The per-key lookup alone did not cover menu/gameplay prompts;
+  the action lookup at main+0x40c5020 required its own hook, described above. `GetPlatformIcons` / `SetPlatformIcons`
+  (exec0x449db80/0x449e150, field+0xd8) is only an on/off setting, not the platform selector.
+- [LAYOUT_BENCH.md](LAYOUT_BENCH.md) records eight alternating Nintendo/PlayStation runs with bottom acceptance enabled
+  for PlayStation. There is no consistent FPS regression outside the repeated-run spread at1800p or2160p.
+  The action wrapper performs bounded map validation per prompt; it is not free. Both layouts remain below stable60.
 - `button_accept_bottom=1` still uses the virtual-function wrappers on `UEnhancedInputPlatformData` (now its only way to rewrite the
   redirects, since the scan that also caught them is gone; destructors excluded, see above). The precise consumer (`UEnhancedInputPlatformSettings` collecting the
   redirects into `RebuildControlMappings`) was searched for, not found yet: `GetContextRedirect` (exec 0x37fc710, native 0x37fc7a0)
