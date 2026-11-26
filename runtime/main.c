@@ -230,7 +230,7 @@ static const char* ini_get(const char* k, const char* def){ for(int i=0;i<g_ini_
 
 static void ini_apply(const char* k, const char* v){
     if(!strcmp(k,"docked")) g_opt_docked=atoi(v);
-    else if(!strcmp(k,"display_resolution")){ int h=atoi(v); g_opt_display_h= (h==1440 || h==2160)? h : 0; }
+    else if(!strcmp(k,"display_resolution")){ int h=atoi(v); g_opt_display_h= (h>1080 && h<=2160 && h%9==0)? h : 0; }   /* 16:9 with whole pixels: 1440, 1620, 1800, 2160 */
     else if(!strcmp(k,"env")){ /* env=NAME=VALUE: a runtime switch (NXRT_* / SWR_*) set from the ini, before the renderer starts */
       const char* eq=strchr(v,'='); if(eq && eq>v && (!strncmp(v,"NXRT_",5) || !strncmp(v,"SWR_",4))){ char name[96]; size_t n=(size_t)(eq-v); if(n<sizeof name){ memcpy(name,v,n); name[n]=0;
 #ifdef _WIN32
@@ -315,7 +315,7 @@ typedef struct { const char* title; const IniOpt* o; } IniSec;
 
 static const IniOpt INI_DISPLAY[]={
   {"docked","0","1 = TV mode (1920x1080 / 1600x900 games), 0 = handheld mode (1280x720)"},
-  {"display_resolution","0","TV mode: the TV resolution the game is told about. 0 = 1920x1080 (the console default), 1440 or 2160\n;   = a 2560x1440 or 3840x2160 TV (the game then sizes its own output; experimental)"},
+  {"display_resolution","0","TV mode: the TV resolution the game is told about. 0 = 1920x1080 (the console default), 1440 / 1620 / 1800 / 2160\n;   = a 2560x1440 / 2880x1620 / 3200x1800 / 3840x2160 TV (the game then sizes its own output; experimental)"},
   {"fullscreen","1","1 = start in fullscreen (F11 or Alt+Enter toggles it in game)"},
   {"language","1","Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 9 Portuguese, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"},
   {"keyboard_text","Player","What the on-screen keyboard answers when a game asks you to type something (names...)"},
