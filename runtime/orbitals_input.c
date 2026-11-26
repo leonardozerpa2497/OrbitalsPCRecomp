@@ -220,7 +220,10 @@ void orbitals_input_ini(const char* k, const char* v){
   else if(!strcmp(k,"gyro_invert")) G.invert=atoi(v)&3;
   else if(!strcmp(k,"gyro_calibrate")) G.calibrate=atoi(v)==1;
   else if(!strcmp(k,"gyro_test")) G.test=atoi(v)==1;
-  else if(!strcmp(k,"gyro_test_delay")){ float f=(float)atof(v); if(f>=0 && f<=600) G.test_delay=f; }
+  else if(!strcmp(k,"gyro_test_delay")){
+    char* end; float f=strtof(v,&end);
+    if(end!=v && !end[strspn(end," \t\r\n")]){ if(f>=0 && f<=600) G.test_delay=f; }
+  }
   else if(!strcmp(k,"gyro_log")) G.log=atoi(v)==1;
 }
 int orbitals_gyro_wanted(void){ return G.mode || G.test || G.calibrate || G.log; }

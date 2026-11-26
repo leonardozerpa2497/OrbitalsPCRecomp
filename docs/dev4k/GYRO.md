@@ -143,7 +143,8 @@ under `/tmp/claude-1000/bench/` and `controls-native-gate-ps-{menu,coop,paused,r
   UpdateRotation hitch, before the ship scene (91.96 s); a delay past loading lets the test run in gameplay. Gate tests: no start
   before the delay although the 3 s gate is met and after a 208 ms hitch, start at exactly the delay then PASS; past the delay
   the 3 s window still applies and a gap ends a running delayed test INCONCLUSIVE with no second start; the delay counts from
-  arming, not from when the gate opened; the parser keeps 0-600 and refuses -1, 600.5, nan, inf, 1e9. Mutations: no delay check,
+  arming, not from when the gate opened; the parser keeps 0-600 and refuses -1, 600.5, nan, inf, 1e9, empty text and trailing
+  non-whitespace text (invalid input retains the previous delay). Mutations: no delay check,
   delay counted from the clock origin, setting ignored, no bounds, no 3 s window before the start; each fails.
 - Real pad still 60 s (`gyro_log=1`): resumed after the owner connected the pad; logs and final measured drift are recorded
   in the run report. Initial run exposed the clock rollback above; its uncalibrated P1 zero-drift lines are not a pass.

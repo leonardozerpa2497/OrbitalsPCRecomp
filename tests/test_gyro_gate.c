@@ -418,7 +418,8 @@ static void test_synthetic_engine_drop_fails(void){
 /* gyro_test_delay: parsed only inside 0-600 s, an invalid value keeps the previous one */
 static void test_delay_parsing(void){
   static const struct { const char* v; float want; } cases[] = {
-    { "15", 15 }, { "-1", 15 }, { "600.5", 15 }, { "nan", 15 }, { "inf", 15 }, { "1e9", 15 }, { "600", 600 }, { "2.5", 2.5f }, { "0", 0 },
+    { "15", 15 }, { "garbage", 15 }, { "", 15 }, { "  ", 15 }, { "0junk", 15 }, { "110s", 15 },
+    { "-1", 15 }, { "600.5", 15 }, { "nan", 15 }, { "inf", 15 }, { "1e9", 15 }, { "600", 600 }, { "2.5", 2.5f }, { " 110 \t", 110 }, { "0", 0 },
   };
   G.test_delay = 0;
   for(size_t i = 0; i < sizeof cases / sizeof cases[0]; i++){
