@@ -7,10 +7,21 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
 - The game ships every icon: `DA_PlatformInputIcons` maps each FKey to a texture per `EPlatformType`
   (Desktop 0, Playstation 1, Xbox 2, Switch 3). The Switch 2 build always draws the Switch entry (which reuses the Xbox
   letter textures, swapped to the Nintendo positions).
-- `button_layout=playstation|xbox`: a low-priority runtime thread scans the game's memory once a second for those 4-entry
-  maps (key byte 0..3, texture pointer, hash ids, four textures of one class) and copies the PlayStation / Xbox texture into
-  the Switch entry. The game keeps building new copies for its prompts (about 50 a second in menus), hence the scan for the
-  whole session (0.1-0.3 s a second on one low priority thread).
+- `button_layout=playstation|xbox` (current design, no memory scan; built 2026-11-26 from `main.bin`, not yet run on the PC):
+  every icon lookup goes through one native function, `UMoreporkInputIconDataAsset` lookup main+0x40c5ce0
+  `(asset, const FKey*, EPlatformType, UTexture2D** out) -> bool` (InputIcons TMap at asset+0x30, 0x70-byte elements; the
+  per-platform TMap inside, 0x18-byte elements: key byte, texture at +8). Its only callers: the `GetIconBrushForKey` exec
+  (main+0x40b2d20, bl at 0x40b2e64: Blueprint prompts) and the native icon widget (bl at 0x4634a78: asks Switch 3 through the shared
+  `return 3` stub 0x4c4f0 when it has an owning player, Xbox 2 when not). `InputIcons` is CPF_Edit only (not Blueprint visible), and a
+  search of the text for the inlined two-level lookup (0x70 / 0x18 strides with a byte key) finds no other copy (the two other byte-keyed
+  0x18 maps, 0x453efec / 0x4540f4c, are gameplay maps on actors). The runtime wraps that function: a Switch request (and, for
+  PlayStation, the widget's Xbox fallback) looks up 1 (PlayStation) / 2 (Xbox) first and falls back to the original platform when the key
+  has no entry. Nothing in guest memory is written. Fail closed: the entry, both element strides, the key / texture loads and the two
+  callers' `bl` words are checked; a miss logs "button icons: not applied (...)" and the icons stay Nintendo.
+- Log: "Orbitals: button icons: PlayStation icons (icon lookup main+40c5ce0 wrapped)"; once, if any key lacks the layout's icon,
+  "a key without a PlayStation icon keeps the platform 3 one".
+- Before (removed): a low-priority thread scanned all guest memory once a second for those 4-entry maps and rewrote their Switch
+  texture. It cost 10.7% frames over 17.7 ms at 1800p co-op (see Performance below).
 - Buttons keep their places: accept stays on the right button (Circle / Xbox B) and the prompts show exactly that
   ("○ Comenzar" on the title screen). Checked: title, main menu, lobby, prompts in co-op (screenshots in the night report).
 
@@ -25,7 +36,8 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   `/tmp` tool, booted fine): the redirect data does not come from the config at run time. CommonInput platform settings in the
   same layers did not change the icons either.
 - `button_accept_bottom=1`: the runtime empties the redirect maps of `UEnhancedInputPlatformData` objects (vtable
-  main+0x7fecb38, TMap at +0x28) as they load (wrappers on the object's virtual functions + the memory scan) and the user
+  main+0x7fecb38, TMap at +0x28) as they load (wrappers on the object's virtual functions; the memory scan
+  that also did it is removed) and the user
   Game.ini gives the UI the PC contexts. Result: lobby and later screens accept with the bottom button and go back with the
   right one, prompts matching. CommonUI's own buttons (title "Comenzar", main menu items, the lobby's "Comenzar") keep the
   platform's accept key (right button): that comes from the platform's `bSwapForwardAndBackButtons`, not Enhanced Input.
@@ -36,8 +48,7 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   the value at start (a data patch like the redirect one), then `button_accept_bottom` can become the PlayStation default.
 
 ## Review notes (Codex, 2026-11-26)
-- The memory scan now runs under the runtime's memory lock per 1 MB chunk (no unmap during the read) and only patches maps
-  whose four textures belong to the texture class learned at the first full match.
+- (Historical) the memory scan ran under the runtime's memory lock per 1 MB chunk; it is removed (scanner-free icon lookup above).
 - Open for `button_accept_bottom` (why it stays experimental): the redirect maps are emptied by writing the TSparseArray
   counters from another thread (not transactional with the game's readers); the TSet hash buckets are left as they were, so a
   later Add on the same map could misbehave (the game is not seen adding to it after load); the virtual-function wrappers add a
@@ -71,3 +82,13 @@ Code: `runtime/orbitals_input.c` (button layout section). Measured on the gaming
   `TMap<EPlatformType, UTexture2D*>::Find(Switch=3)` (start from the UFunction / property tables of those classes, e.g. the
   `InputIconData` property at main+0x86df628) and hook it to look up 1 (PlayStation) or 2 (Xbox); fall back to 3 when that entry is
   empty. `GetPlatformIcons` / `SetPlatformIcons` (exec 0x449db80 / 0x449e150, field +0xd8) is only a bool user setting, not the type.
+- Done (2026-11-26, offline): the scan is removed; icons go through the icon lookup wrapper above, at no cost outside icon lookups
+  (one extra lookup only when a key lacks the layout's icon). Bench needed: same 1800p co-op scene, Nintendo vs PlayStation,
+  alternated >= 2 runs each; expected PlayStation = Nintendo within spread (before: PlayStation 34.37 fps, p95 64.55, p99 163.46,
+  spikes 10.70%, max 674 ms; Nintendo 48.30 fps, p95 25.37, p99 29.53, spikes 0.83%).
+- `button_accept_bottom=1` still uses the virtual-function wrappers on `UEnhancedInputPlatformData` (now its only way to rewrite the
+  redirects, since the scan that also caught them is gone). The precise consumer (`UEnhancedInputPlatformSettings` collecting the
+  redirects into `RebuildControlMappings`) was searched for, not found yet: `GetContextRedirect` (exec 0x37fc710, native 0x37fc7a0)
+  is only called from Blueprint; the settings object has `InputData` at +0x40 and `InputDataClasses` at +0x50 (reflection params at
+  main+0x85579d8 / 0x8557a58), `bShouldLogMappingContextRedirects` param at 0x8557a90. PC check: the log must show
+  "N Switch mapping context redirects of the platform data at ... now keep the PC contexts" once the lobby loads.

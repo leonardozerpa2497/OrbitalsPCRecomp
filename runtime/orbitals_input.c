@@ -10,14 +10,14 @@ void ini_set(const char* k, const char* v);   /* main.c: stores a setting and re
 /* ===================================================================== button layout
    Measured on the PC (2026-11-26, docs/dev4k/BUTTON_LAYOUT.md):
    - Icons: DA_PlatformInputIcons maps each key to a texture per EPlatformType (Desktop 0, Playstation 1, Xbox 2, Switch 3) and the Switch 2
-     build always draws the Switch one. button_layout=xbox / playstation copies that controller's texture into the Switch entry of every
-     key in memory (ei_scan_thread / icon_map_patch): every prompt shows the Xbox / DualSense button for the same key. Buttons keep their
-     places, so accept stays on the right button (B on an Xbox pad, Circle on a DualSense) and the icons say so.
+     build always asks for the Switch one. button_layout=xbox / playstation wraps the game's one icon lookup (icon_lookup) so that a
+     Switch request gets that controller's texture: every prompt shows the Xbox / DualSense button for the same key. Buttons keep their
+     places unless button_accept_bottom is on, and the icons follow the key either way.
    - Accept on the bottom button (button_accept_bottom=1, experimental): the Switch 2 build redirects six Enhanced Input mapping contexts
      to Switch versions (BP_Switch2InputPlatformData, MappingContextRedirects) and its UI lists those Switch versions
      (MoreporkDeveloperSettings PlatformMappingContexts). The redirect data does not come from the config at run time (a user Input.ini,
      the Generated platform layer and a replaced Switch2Input.ini inside the pak were all ignored), so the runtime empties the redirect
-     maps' targets in memory as they load (each redirect points a context to itself) and gives the UI the PC contexts (user Game.ini):
+     maps' targets as they load (each redirect points a context to itself, ei_virtual) and gives the UI the PC contexts (user Game.ini):
      the lobby, the pause menu and the game then accept on the bottom button. CommonUI's own buttons (title screen, main menu,
      "Comenzar") and Slate navigation use the platform's accept / back keys: those two EKeys globals are swapped at start (ekeys_init).
    nintendo (default) changes nothing. */
@@ -65,18 +65,8 @@ const char* orbitals_layout_overlay(void){
    UI list (MoreporkDeveloperSettings PlatformMappingContexts, user Game.ini) is set to the same PC contexts so the prompts match. */
 enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
 static u64 g_ei_vtable;
-int mem_block(int i, u64* addr, u64* size, u32* perm);   /* mem.c */
 int mem_with_range(u64 addr, u64 len, void (*fn)(u64 addr, u64 len, void* ctx), void* ctx);
 int mem_span_ok_locked(u64 addr, u64 size, u32 perm);   /* inside mem_with_range only */
-#ifdef _WIN32
-#include <windows.h>
-static int host_committed(const void* p, size_t n){
-  MEMORY_BASIC_INFORMATION mi; const u8* a=p, *e=a+n;
-  while(a<e){ if(!VirtualQuery(a,&mi,sizeof mi) || mi.State!=MEM_COMMIT || (mi.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return 0; a=(const u8*)mi.BaseAddress+mi.RegionSize; }
-  return 1; }
-#else
-static int host_committed(const void* p, size_t n){ (void)p; (void)n; return 1; }
-#endif
 static int ei_clear(u64 obj){
   if((obj&7) || !mem_span_ok_locked(obj,0x78,PERM_RW)) return 0;
   u64 data=gr64(obj+0x28);
@@ -96,69 +86,44 @@ static int ei_clear(u64 obj){
   }
   if(changed) LOG("Orbitals: button layout: %d Switch mapping context redirects of the platform data at %llx now keep the PC contexts\n",changed,(unsigned long long)obj);
   return changed>0; }
-/* Button icons: DA_PlatformInputIcons maps each FKey to a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2,
-   Switch 3), and the Switch 2 game always asks for the Switch entry. Each of those maps is 4 set elements of 24 bytes (key byte,
-   texture pointer at +8, hash next id at +16, hash index at +20) holding the keys 0..3 and four textures of one class: the Switch
-   element gets the texture of the layout's entry, so every prompt draws that controller's icon for the same key. */
-static int g_icons_done; static u64 g_tex_vtable;   /* the texture class, from the first full match */
-static int icon_map_patch(u64 a, int want){
-  int at[4]={-1,-1,-1,-1};
-  for(int e=0;e<4;e++){
-    const u8* p=GP(a+24*e); u8 k=p[0];
-    if(k>3 || at[k]>=0) return 0;
-    i32 nx, hi; memcpy(&nx,p+16,4); memcpy(&hi,p+20,4);
-    if(nx<-1 || nx>3 || hi<0 || hi>15) return 0;
-    at[k]=e;
-  }
-  u64 tex[4], vt=0;
-  for(int k=0;k<4;k++){
-    tex[k]=gr64(a+24*at[k]+8);
-    if(!tex[k] || (tex[k]&7) || !mem_span_ok_locked(tex[k],8,PERM_R) || !host_committed(GP(tex[k]),8)) return 0;
-    u64 v=gr64(tex[k]); if(!v || (vt && v!=vt)) return 0; vt=v;
-  }
-  if(vt<g_code_lo || vt>=g_code_hi+0x8000000ull) return 0;   /* a vtable in the game module */
-  if(g_tex_vtable && vt!=g_tex_vtable) return 0;
-  if(!g_tex_vtable){ if(tex[0]==tex[1] || tex[1]==tex[2] || tex[2]==tex[3]) return 0; g_tex_vtable=vt; LOG("Orbitals: button icons: texture class %llx\n",(unsigned long long)vt); }
-  if(tex[3]==tex[want]) return 0;
-  gw64(a+24*at[3]+8,tex[want]);
-  return 1;
+/* Button icons: DA_PlatformInputIcons (UMoreporkInputIconDataAsset) keeps InputIcons, a TMap<FKey, entry> (0x70-byte elements at
+   +0x30) whose entry holds a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2, Switch 3; 0x18-byte elements: key
+   byte, texture at +8). Every lookup goes through one native function, main+0x40c5ce0 (asset, const FKey*, EPlatformType, UTexture2D**
+   out) -> bool, called only by the GetIconBrushForKey exec (Blueprint prompts, main+0x40b2e64) and the native icon widget
+   (main+0x4634a78, which asks for Switch 3 when it has an owning player and Xbox 2 when not). InputIcons is not visible to Blueprint
+   (CPF_Edit only) and no other code reads those maps (checked by the inlined lookup pattern in main.bin). button_layout=xbox /
+   playstation wraps that function: a Switch request (and, for playstation, the Xbox fallback) looks up the layout's entry first and
+   falls back to the original request when the key has none. No guest memory is written. */
+enum { ICON_LOOKUP=0x40c5ce0, ICON_CALL_BP=0x40b2e64, ICON_CALL_WIDGET=0x4634a78 };
+static GuestFn icon_lookup_orig; static int g_icon_want;   /* 1 Playstation, 2 Xbox */
+static void icon_lookup(CPU* c, u64 entry){
+  u8 plat=(u8)c->x[2];
+  if(!(plat==3 || (plat==2 && g_icon_want==1))){ icon_lookup_orig(c,entry); return; }
+  u64 x0=c->x[0], x1=c->x[1], x3=c->x[3], lr=c->x[30];
+  c->x[2]=(u64)g_icon_want;
+  icon_lookup_orig(c,entry);   /* returns with c->pc = lr; writes *out only when it finds the texture */
+  if(c->x[0]&1) return;
+  static int said; if(!__atomic_exchange_n(&said,1,__ATOMIC_RELAXED)) LOG("Orbitals: button icons: a key without a %s icon keeps the platform %d one\n",g_icon_want==1?"PlayStation":"Xbox",plat);
+  c->x[0]=x0; c->x[1]=x1; c->x[2]=plat; c->x[3]=x3; c->x[30]=lr;
+  icon_lookup_orig(c,entry);
 }
-static void scan_chunk(u64 c, u64 n, void* ctx){
-  int* cleared=ctx;
-  if(!host_committed(GP(c),(size_t)n)) return;
-  const u64* w=(const u64*)GP(c);
-  for(u64 k=0;k+15<n/8;k++){
-    if(g_accept_bottom && w[k]==g_ei_vtable) *cleared+=ei_clear(c+k*8);
-    else if((u8)w[k]<=3 && (u8)w[k+3]<=3 && (u8)w[k+6]<=3 && (u8)w[k+9]<=3 &&
-            ((1u<<(u8)w[k])|(1u<<(u8)w[k+3])|(1u<<(u8)w[k+6])|(1u<<(u8)w[k+9]))==15)
-      g_icons_done+=icon_map_patch(c+k*8,g_layout==1? 2 : 1);
+static void icon_install(const SwrModInfo* mod){
+  /* entry pacibsp; stp x29, x30, [sp, #-0x40]!; mov w12, #0x70 (outer element); mov w10, #0x18 (inner element); ldrb w12, [x11]
+     (platform key); ldr x8, [x11, #8] (texture); and the two callers' bl */
+  static const struct { u32 off, w; } sig[]={ {0x40c5ce0,0xd503237f}, {0x40c5ce4,0xa9bc7bfd}, {0x40c5d78,0x52800e0c}, {0x40c5de4,0x5280030a},
+                                               {0x40c5dec,0x3940016c}, {0x40c5e10,0xf9400568}, {ICON_CALL_BP,0x94004b9f}, {ICON_CALL_WIDGET,0x97ea449a} };
+  for(unsigned i=0;i<sizeof sig/sizeof sig[0];i++){
+    u64 a=mod->base+sig[i].off;
+    if(a<g_code_lo || a>=g_code_hi || gr32(a)!=sig[i].w){ LOG("Orbitals: button icons: not applied (icon lookup not found, %x)\n",sig[i].off); return; }
   }
+  u64 pc=mod->base+ICON_LOOKUP;
+  GuestFn* e=&g_disp[(pc-g_code_lo)/4];
+  if(!*e){ LOG("Orbitals: button icons: not applied (icon lookup has no entry)\n"); return; }
+  g_icon_want= g_layout==1? 2 : 1;
+  icon_lookup_orig=*e; *e=icon_lookup;
+  LOG("Orbitals: button icons: %s icons (icon lookup main+%x wrapped)\n",g_layout==1?"Xbox":"PlayStation",ICON_LOOKUP);
 }
-static void ei_scan_thread(void* arg){
-  (void)arg; int cleared=0;
-  u64 start=plat_ns();
-  plat_thread_low_priority();
-  /* the game builds new icon maps all along (about 50 a second in menus: the prompts' own copies), so the scan runs for the whole
-     session, once a second (0.1-0.3 s of one low priority thread). With button_accept_bottom the redirect data loads about 16 s
-     after start: from 8 to 30 s the scans then run back to back to empty it as early as possible */
-  for(int round=0;!g_quit;round++){
-    u64 up=(plat_ns()-start)/1000000000ull;
-    plat_sleep_ns(g_accept_bottom && up>=8 && up<30? 20000000ll : 1000000000ll);
-    u64 t0=plat_ns(), scanned=0;
-    for(int i=0;;i++){
-      u64 a,sz; u32 perm; if(!mem_block(i,&a,&sz,&perm)) break;
-      if((perm&3)!=3 || (perm&4) || sz<0x1000) continue;
-      for(u64 c=a;c<a+sz;c+=0x100000){   /* 1 MB at a time, under the memory lock (no unmap meanwhile), committed pages only */
-        u64 n= a+sz-c<0x100000? a+sz-c : 0x100000;
-        if(mem_with_range(c,n,scan_chunk,&cleared)) scanned+=n;
-      }
-    }
-    static int said_c=-1;
-    static int said_icons; if(round<2 || cleared!=said_c || (round%60==0 && g_icons_done!=said_icons)){ said_c=cleared; said_icons=g_icons_done;
-      LOG("Orbitals: button layout scan %d: %.1f GB in %.1f s, %d platform data maps emptied, %d icon sets switched so far\n",round,scanned/1e9,(plat_ns()-t0)/1e9,cleared,g_icons_done); }
-  }
-}
-/* ...and before its first use: every virtual function the object's vtable reaches (UObject's own, shared with other classes)
+/* The redirect maps are emptied before their first use: every virtual function the object's vtable reaches (UObject's own, shared with other classes)
    goes through a wrapper that, once the call returns, empties the map of a UEnhancedInputPlatformData it was called on. The
    loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads the map */
 enum { EI_SLOTS=64 };
@@ -210,9 +175,11 @@ static void ekeys_install(const SwrModInfo* mod){
 }
 static void ei_install(const SwrModInfo* mod){
   if(!g_layout) return;
-  if(g_accept_bottom) ekeys_install(mod);
+  icon_install(mod);
+  if(!g_accept_bottom) return;
+  ekeys_install(mod);
   g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;
-  for(int i=0;g_accept_bottom && i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
+  for(int i=0;i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
     u64 slot=g_ei_vtable+8ull*i; if(!guest_span_readable(slot,8,8)) break;
     u64 fn=gr64(slot); if(fn<mod->size) fn+=mod->base;   /* the game's own loader relocates its data later: still module offsets here */
     if(fn<g_code_lo || fn>=g_code_hi || (fn&3)) break;   /* past the end of the vtable */
@@ -223,7 +190,6 @@ static void ei_install(const SwrModInfo* mod){
   }
   LOG("Orbitals: button layout: %d virtual functions of the input platform data watched (vtable %llx: %llx %llx, code %llx-%llx)\n",g_neiw,
       (unsigned long long)g_ei_vtable,(unsigned long long)gr64(g_ei_vtable),(unsigned long long)gr64(g_ei_vtable+8),(unsigned long long)g_code_lo,(unsigned long long)g_code_hi);
-  plat_thread(ei_scan_thread,NULL,0x10000);
 }
 
 /* ===================================================================== gyro aiming
