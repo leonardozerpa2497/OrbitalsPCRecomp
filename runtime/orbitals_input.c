@@ -8,17 +8,20 @@
 void ini_set(const char* k, const char* v);   /* main.c: stores a setting and rewrites the ini */
 
 /* ===================================================================== button layout
-   The Switch 2 build redirects six Enhanced Input mapping contexts to Switch versions (BP_Switch2InputPlatformData, loaded from
-   [EnhancedInputPlatformSettings_Switch2] in the game's Switch2Input.ini): IMC_UI_Default -> IMC_UI_PlatformSwitch moves UI accept to
-   Gamepad_FaceButton_Right and back to Gamepad_FaceButton_Bottom (the Nintendo convention). The PC version of the game uses the
-   unredirected contexts (accept on the bottom button). Its button icons come from DA_PlatformInputIcons, per key and per
-   EPlatformType (Desktop / Playstation / Switch / Xbox), and CommonInput's controller data for Windows lists BP_InputData_Xbox (gamepad
-   name XSX) and BP_InputData_Playstation (PS5).
-   button_layout=xbox / playstation writes Unreal's user config layer for the Switch2 platform (Orbitals/Saved/Config/Switch2/, which
-   the game reads from its RomFS) into <exe folder>/button_layout/<layout>/ and lays it over the RomFS: the redirect list is cleared
-   (accept on the bottom button in menus and in game, for both players) and CommonInput gets that controller's data as its default.
-   nintendo (default) adds nothing. */
+   Measured on the PC (2026-11-26, docs/dev4k/BUTTON_LAYOUT.md):
+   - Icons: DA_PlatformInputIcons maps each key to a texture per EPlatformType (Desktop 0, Playstation 1, Xbox 2, Switch 3) and the Switch 2
+     build always draws the Switch one. button_layout=xbox / playstation copies that controller's texture into the Switch entry of every
+     key in memory (ei_scan_thread / icon_map_patch): every prompt shows the Xbox / DualSense button for the same key. Buttons keep their
+     places, so accept stays on the right button (B on an Xbox pad, Circle on a DualSense) and the icons say so.
+   - Accept on the bottom button (button_accept_bottom=1, experimental): the Switch 2 build redirects six Enhanced Input mapping contexts
+     to Switch versions (BP_Switch2InputPlatformData, MappingContextRedirects) and its UI lists those Switch versions
+     (MoreporkDeveloperSettings PlatformMappingContexts). The redirect data does not come from the config at run time (a user Input.ini,
+     the Generated platform layer and a replaced Switch2Input.ini inside the pak were all ignored), so the runtime empties the redirect
+     maps in memory as they load and gives the UI the PC contexts (user Game.ini): the lobby, the pause menu and the game then accept on
+     the bottom button. CommonUI's own buttons (title screen, main menu, "Comenzar") keep the platform's accept key, the right button.
+   nintendo (default) changes nothing. */
 static int g_layout;   /* 0 nintendo, 1 xbox, 2 playstation */
+static int g_accept_bottom;   /* button_accept_bottom=1: Enhanced Input's Switch redirects taken out (experimental) */
 
 static int write_text(const char* path, const char* text){
   FILE* f=fopen(path,"wb"); if(!f) return 0;
@@ -26,7 +29,7 @@ static int write_text(const char* path, const char* text){
 }
 
 const char* orbitals_layout_overlay(void){
-  if(!g_layout) return NULL;
+  if(!g_layout || !g_accept_bottom) return NULL;
   static char root[1200];
   const char* name= g_layout==1? "xbox" : "playstation";
   char dir[1400];
@@ -36,26 +39,131 @@ const char* orbitals_layout_overlay(void){
   size_t n=(size_t)snprintf(dir,sizeof dir,"%s",root);
   for(unsigned i=0;i<4 && n<sizeof dir;i++){ n+=(size_t)snprintf(dir+n,sizeof dir-n,"/%s",parts[i]); plat_mkdir(dir); }
   char path[1500];
-  snprintf(path,sizeof path,"%s/Input.ini",dir);
-  int ok=write_text(path,
-    "; written by the runtime (button_layout): the PC version's input mappings, accept on the bottom button\n"
-    "[EnhancedInputPlatformSettings_Switch2 EnhancedInputPlatformSettings]\n"
-    "!InputData=ClearArray\n");
-  char game[1024];
-  snprintf(game,sizeof game,
-    "; written by the runtime (button_layout): %s controller data and icons\n"
-    "[CommonInputPlatformSettings_Switch2 CommonInputPlatformSettings]\n"
-    "DefaultGamepadName=%s\n"
-    "bCanChangeGamepadType=False\n"
-    "!ControllerData=ClearArray\n"
-    "+ControllerData=/Game/Orbitals/Blueprints/UI/CommonUI/InputData/%s.%s_C\n",
-    g_layout==1? "Xbox" : "PlayStation", g_layout==1? "XSX" : "PS5",
-    g_layout==1? "BP_InputData_Xbox" : "BP_InputData_Playstation", g_layout==1? "BP_InputData_Xbox" : "BP_InputData_Playstation");
   snprintf(path,sizeof path,"%s/Game.ini",dir);
-  ok&=write_text(path,game);
-  if(!ok){ LOG("Orbitals: button layout %s: could not write %s\n",name,dir); return NULL; }
-  LOG("Orbitals: button layout %s (Unreal user config from %s)\n",name,root);
+  if(!write_text(path,
+    "; written by the runtime (button_accept_bottom): the UI's input contexts are the PC version's ones\n"
+    "[/Script/MoreporkUI.MoreporkDeveloperSettings]\n"
+    "!PlatformMappingContexts=ClearArray\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/UI/IMC_UI_Default.IMC_UI_Default\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/IMC_Cutscene.IMC_Cutscene\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/IMC_SpiritJug.IMC_SpiritJug\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/IMC_SettlementGames.IMC_SettlementGames\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/UI/IMC_UI_CRU.IMC_UI_CRU\n"
+    "+PlatformMappingContexts=/Game/Orbitals/Input/IMC_Default.IMC_Default\n")){
+    LOG("Orbitals: button layout %s: could not write %s\n",name,dir); return NULL; }
+  LOG("Orbitals: accept on the bottom button (Unreal user config from %s)\n",root);
   return root;
+}
+
+/* The Switch 2 mapping context redirects are not read from the config at run time (neither the user layer nor a replaced
+   Switch2Input.ini changes them: measured 2026-11-26), so they are taken out of the loaded data instead. UEnhancedInputPlatformData
+   (0x78 bytes, vtable main+0x7fecb38, built by main+0x16847a0) keeps MappingContextRedirects as a TMap at +0x28: TSparseArray data
+   pointer +0x28, count +0x30, capacity +0x34, allocation bits +0x38 (bit count +0x50), first free +0x58, free count +0x5c. A thread
+   looks for such objects in the game's memory a few times after start and empties their maps (count, bits and free list say "no
+   elements"; the memory stays allocated): Enhanced Input then keeps the PC version's contexts at its next rebuild. The game's own
+   UI list (MoreporkDeveloperSettings PlatformMappingContexts, user Game.ini) is set to the same PC contexts so the prompts match. */
+enum { EI_PLATFORM_DATA_VTABLE=0x7fecb38 };
+static u64 g_ei_vtable;
+int mem_block(int i, u64* addr, u64* size, u32* perm);   /* mem.c */
+#ifdef _WIN32
+#include <windows.h>
+static int host_committed(const void* p, size_t n){
+  MEMORY_BASIC_INFORMATION mi; const u8* a=p, *e=a+n;
+  while(a<e){ if(!VirtualQuery(a,&mi,sizeof mi) || mi.State!=MEM_COMMIT || (mi.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return 0; a=(const u8*)mi.BaseAddress+mi.RegionSize; }
+  return 1; }
+#else
+static int host_committed(const void* p, size_t n){ (void)p; (void)n; return 1; }
+#endif
+static int ei_clear(u64 obj){
+  if(!guest_span_writable(obj,0x78,8)) return 0;
+  u32 num=gr32(obj+0x30), max=gr32(obj+0x34), bits=gr32(obj+0x50), nfree=gr32(obj+0x5c);
+  if(!num || num>256 || max<num || bits<num || bits>max+64 || nfree>num) return 0;
+  gw32(obj+0x50,0); gw32(obj+0x58,0xffffffffu); gw32(obj+0x5c,0); __atomic_store_n((u32*)GP(obj+0x30),0,__ATOMIC_RELEASE);
+  LOG("Orbitals: button layout: %u Switch mapping context redirects taken out of the platform data at %llx\n",num-nfree,(unsigned long long)obj);
+  return 1; }
+/* Button icons: DA_PlatformInputIcons maps each FKey to a TMap<EPlatformType, UTexture2D*> (Desktop 0, Playstation 1, Xbox 2,
+   Switch 3), and the Switch 2 game always asks for the Switch entry. Each of those maps is 4 set elements of 24 bytes (key byte,
+   texture pointer at +8, hash next id at +16, hash index at +20) holding the keys 0..3 and four textures of one class: the Switch
+   element gets the texture of the layout's entry, so every prompt draws that controller's icon for the same key. */
+static int g_icons_done;
+static int icon_map_patch(u64 a, int want){
+  int at[4]={-1,-1,-1,-1};
+  for(int e=0;e<4;e++){
+    const u8* p=GP(a+24*e); u8 k=p[0];
+    if(k>3 || at[k]>=0) return 0;
+    i32 nx, hi; memcpy(&nx,p+16,4); memcpy(&hi,p+20,4);
+    if(nx<-1 || nx>3 || hi<0 || hi>15) return 0;
+    at[k]=e;
+  }
+  u64 tex[4], vt=0;
+  for(int k=0;k<4;k++){
+    tex[k]=gr64(a+24*at[k]+8);
+    if(!tex[k] || (tex[k]&7) || !guest_span_readable(tex[k],8,8) || !host_committed(GP(tex[k]),8)) return 0;
+    u64 v=gr64(tex[k]); if(!v || (vt && v!=vt)) return 0; vt=v;
+  }
+  if(vt<g_code_lo || vt>=g_code_hi+0x8000000ull) return 0;   /* a vtable in the game module */
+  if(tex[3]==tex[want]) return 0;
+  gw64(a+24*at[3]+8,tex[want]);
+  return 1;
+}
+static void ei_scan_thread(void* arg){
+  (void)arg; int cleared=0;
+  u64 start=plat_ns();
+  plat_thread_low_priority();
+  /* the game builds new icon maps all along (about 50 a second in menus: the prompts' own copies), so the scan runs for the whole
+     session, once a second (0.1-0.3 s of one low priority thread). With button_accept_bottom the redirect data loads about 16 s
+     after start: from 8 to 30 s the scans then run back to back to empty it as early as possible */
+  for(int round=0;!g_quit;round++){
+    u64 up=(plat_ns()-start)/1000000000ull;
+    plat_sleep_ns(g_accept_bottom && up>=8 && up<30? 20000000ll : 1000000000ll);
+    u64 t0=plat_ns(), scanned=0;
+    for(int i=0;;i++){
+      u64 a,sz; u32 perm; if(!mem_block(i,&a,&sz,&perm)) break;
+      if((perm&3)!=3 || (perm&4) || sz<0x1000) continue;
+      for(u64 c=a;c<a+sz;c+=0x100000){   /* 1 MB at a time, committed pages only */
+        u64 n= a+sz-c<0x100000? a+sz-c : 0x100000;
+        if(!host_committed(GP(c),(size_t)n)) continue;
+        const u64* w=(const u64*)GP(c); scanned+=n;
+        for(u64 k=0;k+15<n/8;k++){
+          if(g_accept_bottom && w[k]==g_ei_vtable) cleared+=ei_clear(c+k*8);
+          else if((u8)w[k]<=3 && k+12<n/8 && (u8)w[k+3]<=3 && (u8)w[k+6]<=3 && (u8)w[k+9]<=3 &&
+                  ((1u<<(u8)w[k])|(1u<<(u8)w[k+3])|(1u<<(u8)w[k+6])|(1u<<(u8)w[k+9]))==15)
+            g_icons_done+=icon_map_patch(c+k*8,g_layout==1? 2 : 1);
+        }
+      }
+    }
+    static int said_c=-1;
+    static int said_icons; if(round<2 || cleared!=said_c || (round%60==0 && g_icons_done!=said_icons)){ said_c=cleared; said_icons=g_icons_done;
+      LOG("Orbitals: button layout scan %d: %.1f GB in %.1f s, %d platform data maps emptied, %d icon sets switched so far\n",round,scanned/1e9,(plat_ns()-t0)/1e9,cleared,g_icons_done); }
+  }
+}
+/* ...and before its first use: every virtual function the object's vtable reaches (UObject's own, shared with other classes)
+   goes through a wrapper that, once the call returns, empties the map of a UEnhancedInputPlatformData it was called on. The
+   loader calls several of them right after reading the object's properties (post load), before Enhanced Input reads the map */
+enum { EI_SLOTS=64 };
+static struct { u64 pc; GuestFn orig; } g_eiw[EI_SLOTS]; static int g_neiw;
+static void ei_virtual(CPU* c, u64 entry){
+  u64 obj=c->x[0];
+  GuestFn orig=NULL; for(int i=0;i<g_neiw;i++) if(g_eiw[i].pc==entry){ orig=g_eiw[i].orig; break; }
+  if(!orig) return;
+  orig(c,entry);
+  if(obj && !(obj&7) && guest_span_readable(obj,0x78,8) && gr64(obj)==g_ei_vtable && gr32(obj+0x30)) ei_clear(obj);
+}
+static void ei_install(const SwrModInfo* mod){
+  if(!g_layout) return;
+  g_ei_vtable=mod->base+EI_PLATFORM_DATA_VTABLE;
+  for(int i=0;g_accept_bottom && i<EI_SLOTS && g_neiw<EI_SLOTS;i++){
+    u64 slot=g_ei_vtable+8ull*i; if(!guest_span_readable(slot,8,8)) break;
+    u64 fn=gr64(slot); if(fn<mod->size) fn+=mod->base;   /* the game's own loader relocates its data later: still module offsets here */
+    if(fn<g_code_lo || fn>=g_code_hi || (fn&3)) break;   /* past the end of the vtable */
+    int dup=0; for(int k=0;k<g_neiw;k++) if(g_eiw[k].pc==fn) dup=1;
+    GuestFn* e=&g_disp[(fn-g_code_lo)/4];
+    if(dup || !*e || *e==ei_virtual) continue;
+    g_eiw[g_neiw].pc=fn; g_eiw[g_neiw].orig=*e; g_neiw++; *e=ei_virtual;
+  }
+  LOG("Orbitals: button layout: %d virtual functions of the input platform data watched (vtable %llx: %llx %llx, code %llx-%llx)\n",g_neiw,
+      (unsigned long long)g_ei_vtable,(unsigned long long)gr64(g_ei_vtable),(unsigned long long)gr64(g_ei_vtable+8),(unsigned long long)g_code_lo,(unsigned long long)g_code_hi);
+  plat_thread(ei_scan_thread,NULL,0x10000);
 }
 
 /* ===================================================================== gyro aiming
@@ -81,10 +189,12 @@ static struct {
   int invert;          /* 1 horizontal, 2 vertical, 3 both */
   int calibrate;       /* 1 = calibrate at the next still moment and store it */
   int test;            /* 1 = synthetic gyro test once a player can look */
-} G={0,1.5f,1.5f,20,0,3.0f,0,0,0};
+  int log;             /* 1 = once a second per pad: raw mean / spread, bias, drift after calibration */
+} G={0,1.5f,1.5f,20,0,3.0f,0,0,0,0};
 
 void orbitals_input_ini(const char* k, const char* v){
   if(!strcmp(k,"button_layout")){ g_layout= !strcmp(v,"xbox")? 1 : !strcmp(v,"playstation")? 2 : 0; }
+  else if(!strcmp(k,"button_accept_bottom")) g_accept_bottom=atoi(v)==1;
   else if(!strcmp(k,"gyro")) G.mode= !strcmp(v,"always")? 1 : !strcmp(v,"aim")? 2 : 0;
   else if(!strcmp(k,"gyro_sensitivity_x")){ float f=(float)atof(v); if(f>0 && f<=20) G.sens_x=f; }
   else if(!strcmp(k,"gyro_sensitivity_y")){ float f=(float)atof(v); if(f>0 && f<=20) G.sens_y=f; }
@@ -95,8 +205,9 @@ void orbitals_input_ini(const char* k, const char* v){
   else if(!strcmp(k,"gyro_invert")) G.invert=atoi(v)&3;
   else if(!strcmp(k,"gyro_calibrate")) G.calibrate=atoi(v)==1;
   else if(!strcmp(k,"gyro_test")) G.test=atoi(v)==1;
+  else if(!strcmp(k,"gyro_log")) G.log=atoi(v)==1;
 }
-int orbitals_gyro_wanted(void){ return G.mode || G.test || G.calibrate; }
+int orbitals_gyro_wanted(void){ return G.mode || G.test || G.calibrate || G.log; }
 
 #define RAD2DEG 57.29577951308232
 enum { SLOTS=2 };
@@ -108,6 +219,7 @@ typedef struct {
   u64 still_t0; int still_n; double still_sum[3]; float still_min[3], still_max[3];
   int toggled_off, button_was, has_gyro; u64 button_t0;   /* button_t0: plat_ns() when the gyro button went down */
   int logged_samples;
+  u64 log_t0; int log_n; double log_sum[3]; float log_min[3], log_max[3]; double drift[3];   /* gyro_log */
 } GyroPad;
 static GyroPad P[SLOTS];
 
@@ -195,6 +307,18 @@ static void gyro_sample(int s, GyroPad* g, const PadMotion* m, int synthetic, in
     else { float k=dt_ns? (float)(dt_ns/1e9/(0.08+dt_ns/1e9)) : 0.05f; for(int i=0;i<3;i++) g->grav[i]+=(a[i]-g->grav[i])*k; }
   }
   if(!synthetic) still_sample(s,g,m->t_ns,m->gyro,manual_hold);
+  if(G.log && !synthetic){   /* the still test: what the pad reports at rest, and how far it would turn the camera once calibrated */
+    if(!g->log_t0 || m->t_ns<g->log_t0){ g->log_t0=m->t_ns; g->log_n=0; for(int k=0;k<3;k++){ g->log_sum[k]=0; g->log_min[k]=g->log_max[k]=m->gyro[k]; } }
+    for(int k=0;k<3;k++){ g->log_sum[k]+=m->gyro[k]; if(m->gyro[k]<g->log_min[k]) g->log_min[k]=m->gyro[k]; if(m->gyro[k]>g->log_max[k]) g->log_max[k]=m->gyro[k];
+      if(dt_ns && g->calibrated) g->drift[k]+=(m->gyro[k]-g->bias[k])*dt_ns/1e9*RAD2DEG; }
+    g->log_n++;
+    if(m->t_ns-g->log_t0>=1000000000ull){
+      LOG("gyro still P%d: %d samples, mean %.4f %.4f %.4f rad/s, spread %.4f %.4f %.4f, bias %.4f %.4f %.4f (%s), drift since calibrated %.3f %.3f %.3f deg\n",
+          s+1,g->log_n,g->log_sum[0]/g->log_n,g->log_sum[1]/g->log_n,g->log_sum[2]/g->log_n,g->log_max[0]-g->log_min[0],g->log_max[1]-g->log_min[1],g->log_max[2]-g->log_min[2],
+          g->bias[0],g->bias[1],g->bias[2],g->calibrated==2? "stored" : g->calibrated? "auto" : "none",g->drift[0],g->drift[1],g->drift[2]);
+      g->log_t0=0;
+    }
+  }
   if(!dt_ns || !active) return;
   float w[3]; for(int i=0;i<3;i++) w[i]=m->gyro[i]-(synthetic? 0.0f : g->bias[i]);
   /* player space: yaw is the turn around the world's up axis, the controller's pitch axis gives pitch */
@@ -337,6 +461,7 @@ static int bind(const SwrModInfo* mod, u64 off, u32 w0, GuestFn hook, GuestFn* o
 
 void orbitals_input_install(const SwrModInfo* mod){
   if(memcmp(mod->build_id,orbitals_build,sizeof orbitals_build)) return;
+  ei_install(mod);
   g_add_yaw=mod->base+ADD_YAW; g_add_pitch=mod->base+ADD_PITCH;
   /* AddPitchInput / AddYawInput start with pacibsp; str d8, [sp, #-0x30]!; UpdateRotation with pacibsp; sub sp, sp, #0x90 and the
      game's override with ldrb w8, [x0, #0x73c] */

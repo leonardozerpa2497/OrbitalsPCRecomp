@@ -239,7 +239,7 @@ static void ini_apply(const char* k, const char* v){
         setenv(name,eq+1,1);
 #endif
         LOG("ini: environment %s=%s\n",name,eq+1); } } }
-    else if(!strcmp(k,"button_layout") || !strncmp(k,"gyro",4)){ extern void orbitals_input_ini(const char*, const char*); orbitals_input_ini(k,v); }
+    else if(!strncmp(k,"button_",7) || !strncmp(k,"gyro",4)){ extern void orbitals_input_ini(const char*, const char*); orbitals_input_ini(k,v); }
     else if(!strcmp(k,"language")) g_opt_lang=atoi(v);
     else if(!strcmp(k,"keyboard_text")){ extern char g_opt_swkbd[64]; snprintf(g_opt_swkbd,sizeof g_opt_swkbd,"%s",v); }
     else if(!strcmp(k,"log")) g_verbose=atoi(v);
@@ -327,7 +327,8 @@ static const IniOpt INI_INPUT[]={
   {"mouse_sensitivity","1.00","Mouse sensitivity: F1 10%..500% goes from 5x to 1250x speed, on a curve so 100% stays close to before"},
   {"mouse_invert","0","Mouse inversion: 0 = normal, 1 = horizontal, 2 = vertical, 3 = both"},
   {"keyboard_player","1","Keyboard and mouse: 1 = player 1, 2 = player 2 when player 1 has a gamepad"},
-  {"button_layout","nintendo","Orbitals button layout (applies on restart): nintendo = as on the Switch 2 (accept on the right button),\n;   xbox / playstation = accept on the bottom button and that controller's button icons, in menus and in game"},
+  {"button_layout","nintendo","Orbitals button icons (applies on restart): nintendo = as on the Switch 2, xbox / playstation = that controller's\n;   icons in menus and in game, for every button (the buttons keep their places: accept stays on the right button)"},
+  {"button_accept_bottom","0","Experimental (with xbox / playstation): 1 = accept on the bottom button and back on the right one in the lobby, the\n;   pause menu and in game (the PC version's input). The title screen and the main menu keep the right button"},
   {"gyro","off","Orbitals gyro aiming (motion sensors of a DualSense or other SDL pad): off, always, aim = while the left trigger is held"},
   {"gyro_sensitivity_x","1.5","Gyro horizontal sensitivity: camera degrees per degree the controller turns"},
   {"gyro_sensitivity_y","1.5","Gyro vertical sensitivity: camera degrees per degree the controller tilts"},

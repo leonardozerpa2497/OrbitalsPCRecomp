@@ -131,6 +131,12 @@ static int guest_span_has_perm(u64 addr, u64 size, u64 alignment, u32 required_p
   return 1;
 }
 
+/* the i-th mapped block (sorted by address): 0 past the end. For tools that scan guest memory (orbitals_input.c) */
+int mem_block(int i, u64* addr, u64* size, u32* perm){
+  pm_lock(&g_memlock);
+  int ok= i>=0 && i<nblk; if(ok){ *addr=blk[i].addr; *size=blk[i].size; *perm=blk[i].perm; }
+  pm_unlock(&g_memlock); return ok; }
+
 int guest_span_readable(u64 addr, u64 size, u64 alignment){
   return guest_span_has_perm(addr,size,alignment,PERM_R);
 }
